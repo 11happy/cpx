@@ -1,7 +1,7 @@
 use clap::Parser;
 use cpx::cli::args::CLIArgs;
 use cpx::core::copy::{copy, multiple_copy};
-use cpx::style::progress_bar::ProgressBarStyle;
+use cpx::utility::progress_bar::ProgressBarStyle;
 
 #[tokio::main]
 async fn main() {

@@ -1,4 +1,7 @@
-use crate::style::progress_bar::ProgressBarStyle;
+use crate::utility::preprocess::{
+    CopyPlan, preprocess_directory, preprocess_file, preprocess_multiple,
+};
+use crate::utility::progress_bar::ProgressBarStyle;
 use indicatif::{MultiProgress, ProgressBar};
 use std::io::{self};
 use std::{path::Path, path::PathBuf};
@@ -15,9 +18,8 @@ pub async fn copy(
     concurrency: usize,
 ) -> io::Result<()> {
     let metadata_src = tokio::fs::metadata(source).await?;
-    let metadata_dest = tokio::fs::metadata(destination).await.ok();
 
-    if metadata_src.is_dir() {
+    let plan = if metadata_src.is_dir() {
         if !recursive {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -28,7 +30,7 @@ pub async fn copy(
             ));
         }
 
-        if let Some(dest_meta) = metadata_dest {
+        if let Ok(dest_meta) = tokio::fs::metadata(destination).await {
             if dest_meta.is_file() {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
@@ -37,62 +39,11 @@ pub async fn copy(
             }
         }
 
-        return copy_directory(source, destination, style, concurrency).await;
-    }
-
-    let pb = ProgressBar::new(metadata_src.len());
-    pb.set_message(format!(
-        "{}",
-        source
-            .file_name()
-            .and_then(|f| f.to_str())
-            .unwrap_or("<unknown file>")
-    ));
-    style.apply(&pb);
-
-    if let Some(dest_meta) = metadata_dest {
-        if dest_meta.is_dir() {
-            let file_name = source.file_name().ok_or_else(|| {
-                io::Error::new(io::ErrorKind::InvalidInput, "Invalid source path")
-            })?;
-            let dest_path = destination.join(file_name);
-            return do_copy(source, &dest_path, &pb).await;
-        }
-    }
-
-    do_copy(source, destination, &pb).await
-}
-
-pub async fn do_copy(source: &Path, destination: &Path, pb: &ProgressBar) -> io::Result<()> {
-    let result = async {
-        let src_file = tokio::fs::File::open(source).await?;
-        let dest_file = tokio::fs::File::create(destination).await?;
-
-        let mut src_file = BufReader::new(src_file);
-        let mut dest_file = BufWriter::new(dest_file);
-
-        const BUFFER_SIZE: usize = 512 * 1024;
-        let mut buffer = vec![0u8; BUFFER_SIZE];
-
-        loop {
-            let bytes_read = src_file.read(&mut buffer).await?;
-            if bytes_read == 0 {
-                break;
-            }
-            dest_file.write_all(&buffer[..bytes_read]).await?;
-            pb.inc(bytes_read as u64);
-        }
-        dest_file.flush().await?;
-        Ok(())
-    }
-    .await;
-
-    match &result {
-        Ok(_) => (),
-        Err(_) => pb.abandon_with_message("Copy failed"),
-    }
-
-    result
+        preprocess_directory(source, destination).await?
+    } else {
+        preprocess_file(source, destination).await?
+    };
+    execute_copy(plan, style, concurrency).await
 }
 
 pub async fn multiple_copy(
@@ -101,43 +52,76 @@ pub async fn multiple_copy(
     style: ProgressBarStyle,
     concurrency: usize,
 ) -> io::Result<()> {
-    let dest_metadata = tokio::fs::metadata(&destination).await?;
-    if !dest_metadata.is_dir() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("Destination '{}' is not a directory", destination.display()),
-        ));
+    let plan = preprocess_multiple(&sources, &destination).await?;
+    execute_copy(plan, style, concurrency).await
+}
+
+async fn execute_copy(
+    plan: CopyPlan,
+    style: ProgressBarStyle,
+    concurrency: usize,
+) -> io::Result<()> {
+    for dir in &plan.directories {
+        if let Err(e) = tokio::fs::create_dir_all(dir).await {
+            if e.kind() != io::ErrorKind::AlreadyExists {
+                return Err(e);
+            }
+        }
     }
 
     let multi_progress = MultiProgress::new();
-
-    let mut tasks = Vec::new();
+    let overall_pb = if plan.total_files > 1 {
+        let pb = multi_progress.add(ProgressBar::new(plan.total_size));
+        pb.set_message(format!(
+            "Copying {} files ({} bytes)",
+            plan.total_files, plan.total_size
+        ));
+        style.apply(&pb);
+        Some(pb)
+    } else {
+        None
+    };
 
     let semaphore = Arc::new(Semaphore::new(concurrency));
-    for source in sources {
-        let dest = destination.clone();
-        let mp = multi_progress.clone();
+    let mut tasks = Vec::new();
 
+    for file_task in plan.files {
+        let sem = semaphore.clone();
+        let mp = multi_progress.clone();
+        let overall = overall_pb.clone();
         let style_cloned = style;
-        let semaphore = semaphore.clone();
+
         let task = tokio::spawn(async move {
-            let _permit = semaphore
+            let _permit = sem
                 .acquire()
                 .await
                 .map_err(|_| io::Error::new(io::ErrorKind::Other, "Semaphore closed"))?;
-            let file_name = source.file_name().ok_or_else(|| {
-                io::Error::new(io::ErrorKind::InvalidInput, "Invalid source path")
-            })?;
 
-            let dest_path = dest.join(file_name);
+            let pb = mp.add(ProgressBar::new(file_task.size));
+            let file_name = file_task
+                .source
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| "unknown".to_string());
 
-            let metadata = tokio::fs::metadata(&source).await?;
-            let pb = mp.add(ProgressBar::new(metadata.len()));
-            pb.set_message(format!("{}", file_name.to_string_lossy()));
+            pb.set_message(format!("Copying {}", file_name));
             style_cloned.apply(&pb);
 
-            do_copy(&source, &dest_path, &pb).await?;
-            Ok::<_, io::Error>(())
+            let result = copy_core(
+                &file_task.source,
+                &file_task.destination,
+                file_task.size,
+                &pb,
+                overall.as_ref(),
+            )
+            .await;
+
+            match &result {
+                Ok(_) => pb.finish_and_clear(),
+                Err(_) => pb.abandon_with_message("Copy failed"),
+            }
+
+            result
         });
 
         tasks.push(task);
@@ -152,6 +136,14 @@ pub async fn multiple_copy(
         }
     }
 
+    if let Some(pb) = overall_pb {
+        if errors.is_empty() {
+            pb.finish_with_message(format!("Copied {} files successfully", plan.total_files));
+        } else {
+            pb.abandon_with_message("Copy completed with errors");
+        }
+    }
+
     if !errors.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::Other,
@@ -162,93 +154,53 @@ pub async fn multiple_copy(
     Ok(())
 }
 
-pub async fn copy_directory(
+async fn copy_core(
     source: &Path,
     destination: &Path,
-    style: ProgressBarStyle,
-    concurrency: usize,
+    file_size: u64,
+    file_pb: &ProgressBar,
+    overall_pb: Option<&ProgressBar>,
 ) -> io::Result<()> {
-    let multi_progress = MultiProgress::new();
-    let semaphore = Arc::new(Semaphore::new(concurrency));
+    let src_file = tokio::fs::File::open(source).await?;
+    let dest_file = tokio::fs::File::create(destination).await?;
 
-    do_copy_directory(
-        source.to_path_buf(),
-        destination.to_path_buf(),
-        style,
-        multi_progress,
-        semaphore,
-    )
-    .await
-}
+    let mut src_file = BufReader::new(src_file);
+    let mut dest_file = BufWriter::new(dest_file);
 
-pub async fn do_copy_directory(
-    source: PathBuf,
-    destination: PathBuf,
-    style: ProgressBarStyle,
-    multi_progress: MultiProgress,
-    semaphore: Arc<Semaphore>,
-) -> io::Result<()> {
-    if let Err(e) = tokio::fs::create_dir_all(&destination).await {
-        if e.kind() != io::ErrorKind::AlreadyExists {
-            return Err(e);
+    const BUFFER_SIZE: usize = 512 * 1024;
+    let mut buffer = vec![0u8; BUFFER_SIZE];
+
+    const MAX_UPDATES: u64 = 200;
+    let update_threshold = if file_size > MAX_UPDATES * BUFFER_SIZE as u64 {
+        file_size / MAX_UPDATES
+    } else {
+        BUFFER_SIZE as u64
+    };
+
+    let mut accumulated_bytes = 0u64;
+
+    loop {
+        let bytes_read = src_file.read(&mut buffer).await?;
+        if bytes_read == 0 {
+            break;
+        }
+        dest_file.write_all(&buffer[..bytes_read]).await?;
+
+        accumulated_bytes += bytes_read as u64;
+        if accumulated_bytes >= update_threshold {
+            file_pb.inc(accumulated_bytes);
+            if let Some(pb) = overall_pb {
+                pb.inc(accumulated_bytes);
+            }
+            accumulated_bytes = 0;
         }
     }
-
-    let mut entries = tokio::fs::read_dir(&source).await?;
-    let mut tasks = Vec::new();
-
-    while let Some(entry) = entries.next_entry().await? {
-        let path = entry.path();
-        let file_name = entry.file_name();
-        let dest_path = destination.join(&file_name);
-        let metadata = entry.metadata().await?;
-        let mp = multi_progress.clone();
-        let style_cloned = style;
-        if metadata.is_dir() {
-            Box::pin(do_copy_directory(
-                path,
-                dest_path,
-                style_cloned,
-                mp,
-                semaphore.clone(),
-            ))
-            .await?;
-        } else if metadata.is_file() {
-            let len = metadata.len();
-            let sem_clone = semaphore.clone();
-
-            let task = tokio::spawn(async move {
-                let permit = sem_clone
-                    .acquire()
-                    .await
-                    .map_err(|_| io::Error::new(io::ErrorKind::Other, "Semaphore closed"))?;
-                let pb = mp.add(ProgressBar::new(len));
-                pb.set_message(format!("{}", file_name.to_string_lossy()));
-                style_cloned.apply(&pb);
-                let result = do_copy(&path, &dest_path, &pb).await;
-                drop(permit);
-                result
-            });
-            tasks.push(task);
+    if accumulated_bytes > 0 {
+        file_pb.inc(accumulated_bytes);
+        if let Some(pb) = overall_pb {
+            pb.inc(accumulated_bytes);
         }
     }
-
-    let mut errors = Vec::new();
-
-    for task in tasks {
-        match task.await {
-            Ok(Ok(())) => {}
-            Ok(Err(e)) => errors.push(e.to_string()),
-            Err(e) => errors.push(e.to_string()),
-        }
-    }
-
-    if !errors.is_empty() {
-        return Err(io::Error::new(
-            io::ErrorKind::Other,
-            format!("Errors during directory copy:\n{}", errors.join("\n")),
-        ));
-    }
-
+    dest_file.flush().await?;
     Ok(())
 }
