@@ -1,5 +1,5 @@
 use clap::Parser;
-use cpx::cli::args::CLIArgs;
+use cpx::cli::args::{CLIArgs, CopyOptions};
 use cpx::core::copy::{copy, multiple_copy};
 use cpx::utility::progress_bar::ProgressBarStyle;
 
@@ -11,29 +11,11 @@ async fn main() {
         Some("detailed") => ProgressBarStyle::Detailed,
         _ => ProgressBarStyle::Default,
     };
+    let options = CopyOptions::from(&args);
     let result = if args.sources.len() == 1 {
-        copy(
-            &args.sources[0],
-            &args.destination,
-            style,
-            args.recursive,
-            args.concurrency,
-            args.continue_copy,
-            args.force,
-            args.interactive,
-        )
-        .await
+        copy(&args.sources[0], &args.destination, style, &options).await
     } else {
-        multiple_copy(
-            args.sources,
-            args.destination,
-            style,
-            args.concurrency,
-            args.continue_copy,
-            args.force,
-            args.interactive,
-        )
-        .await
+        multiple_copy(args.sources, args.destination, style, &options).await
     };
     match result {
         Ok(_) => (),

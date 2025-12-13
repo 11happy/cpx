@@ -38,3 +38,24 @@ pub struct CLIArgs {
     #[arg(short = 'i', long, help = "prompt before overwrite")]
     pub interactive: bool,
 }
+
+#[derive(Debug, Clone, Copy)]
+pub struct CopyOptions {
+    pub recursive: bool,
+    pub concurrency: usize,
+    pub resume: bool,
+    pub force: bool,
+    pub interactive: bool,
+}
+
+impl From<&CLIArgs> for CopyOptions {
+    fn from(cli: &CLIArgs) -> Self {
+        Self {
+            recursive: cli.recursive,
+            concurrency: cli.concurrency,
+            resume: cli.continue_copy,
+            force: cli.force,
+            interactive: cli.interactive,
+        }
+    }
+}

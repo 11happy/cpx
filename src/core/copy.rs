@@ -1,3 +1,4 @@
+use crate::cli::args::CopyOptions;
 use crate::utility::helper::prompt_overwrite;
 use crate::utility::preprocess::{
     CopyPlan, preprocess_directory, preprocess_file, preprocess_multiple,
@@ -5,26 +6,21 @@ use crate::utility::preprocess::{
 use crate::utility::progress_bar::ProgressBarStyle;
 use indicatif::{MultiProgress, ProgressBar};
 use std::io::{self};
+use std::sync::Arc;
 use std::{path::Path, path::PathBuf};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader, BufWriter};
-
-use std::sync::Arc;
 use tokio::sync::Semaphore;
 
 pub async fn copy(
     source: &Path,
     destination: &Path,
     style: ProgressBarStyle,
-    recursive: bool,
-    concurrency: usize,
-    resume: bool,
-    force: bool,
-    interactive: bool,
+    options: &CopyOptions,
 ) -> io::Result<()> {
     let metadata_src = tokio::fs::metadata(source).await?;
 
     let plan = if metadata_src.is_dir() {
-        if !recursive {
+        if !options.recursive {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!(
@@ -43,9 +39,9 @@ pub async fn copy(
             }
         }
 
-        preprocess_directory(source, destination, resume).await?
+        preprocess_directory(source, destination, options.resume).await?
     } else {
-        preprocess_file(source, destination, resume).await?
+        preprocess_file(source, destination, options.resume).await?
     };
     if plan.skipped_files > 0 {
         eprintln!(
@@ -53,41 +49,27 @@ pub async fn copy(
             plan.skipped_files, plan.skipped_size
         );
     }
-    execute_copy(
-        plan,
-        style,
-        if interactive { 1 } else { concurrency },
-        force,
-        interactive,
-    )
-    .await
+
+    execute_copy(plan, style, options).await
 }
 
 pub async fn multiple_copy(
     sources: Vec<PathBuf>,
     destination: PathBuf,
     style: ProgressBarStyle,
-    concurrency: usize,
-    resume: bool,
-    force: bool,
-    interactive: bool,
+    options: &CopyOptions,
 ) -> io::Result<()> {
-    let plan = preprocess_multiple(&sources, &destination, resume).await?;
+    let plan = preprocess_multiple(&sources, &destination, options.resume).await?;
     if plan.skipped_files > 0 {
-        eprintln!(
-            "Skipping {} files ({} bytes) that already exist",
-            plan.skipped_files, plan.skipped_size
-        );
+        eprintln!("Skipping {} files that already exist", plan.skipped_files);
     }
-    execute_copy(plan, style, concurrency, force, interactive).await
+    execute_copy(plan, style, options).await
 }
 
 async fn execute_copy(
     plan: CopyPlan,
     style: ProgressBarStyle,
-    concurrency: usize,
-    force: bool,
-    interactive: bool,
+    options: &CopyOptions,
 ) -> io::Result<()> {
     for dir in &plan.directories {
         if let Err(e) = tokio::fs::create_dir_all(dir).await {
@@ -98,18 +80,19 @@ async fn execute_copy(
     }
 
     let multi_progress = MultiProgress::new();
-    let overall_pb = if plan.total_files > 1 && !interactive {
+    let overall_pb = if plan.total_files > 1 && !options.interactive {
         let pb = multi_progress.add(ProgressBar::new(plan.total_size));
-        pb.set_message(format!(
-            "Copying {} files ({} bytes)",
-            plan.total_files, plan.total_size
-        ));
+        pb.set_message(format!("Copying {} files", plan.total_files));
         style.apply(&pb);
         Some(pb)
     } else {
         None
     };
-
+    let concurrency = if options.interactive {
+        1
+    } else {
+        options.concurrency
+    };
     let semaphore = Arc::new(Semaphore::new(concurrency));
     let mut tasks = Vec::new();
 
@@ -118,6 +101,7 @@ async fn execute_copy(
         let mp = multi_progress.clone();
         let overall = overall_pb.clone();
         let style_cloned = style;
+        let options_copy = *options;
 
         let task = tokio::spawn(async move {
             let _permit = sem
@@ -125,7 +109,7 @@ async fn execute_copy(
                 .await
                 .map_err(|_| io::Error::new(io::ErrorKind::Other, "Semaphore closed"))?;
 
-            let pb = if interactive {
+            let pb = if options_copy.interactive {
                 ProgressBar::hidden()
             } else {
                 let pb = mp.add(ProgressBar::new(file_task.size));
@@ -134,7 +118,7 @@ async fn execute_copy(
                     .file_name()
                     .map(|n| n.to_string_lossy().to_string())
                     .unwrap_or_else(|| "unknown".to_string());
-                pb.set_message(format!("Copying {}", file_name));
+                pb.set_message(format!("{}", file_name));
                 style_cloned.apply(&pb);
                 pb
             };
@@ -145,8 +129,7 @@ async fn execute_copy(
                 file_task.size,
                 &pb,
                 overall.as_ref(),
-                force,
-                interactive,
+                options_copy,
             )
             .await;
 
@@ -194,19 +177,18 @@ async fn copy_core(
     file_size: u64,
     file_pb: &ProgressBar,
     overall_pb: Option<&ProgressBar>,
-    force: bool,
-    interactive: bool,
+    options: CopyOptions,
 ) -> io::Result<()> {
     let src_file = tokio::fs::File::open(source).await?;
 
-    if interactive && tokio::fs::metadata(destination).await.is_ok() {
+    if options.interactive && tokio::fs::metadata(destination).await.is_ok() {
         if !prompt_overwrite(destination)? {
             return Ok(());
         }
     }
     let dest_file = match tokio::fs::File::create(destination).await {
         Ok(file) => file,
-        Err(_e) if force => {
+        Err(_e) if options.force => {
             let _ = tokio::fs::remove_file(destination).await;
             tokio::fs::File::create(destination).await?
         }
