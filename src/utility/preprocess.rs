@@ -87,7 +87,7 @@ async fn should_skip_file(source: &Path, destination: &Path) -> io::Result<bool>
     if let (Ok(src_modified), Ok(dest_modified)) =
         (src_metadata.modified(), dest_metadata.modified())
     {
-        if src_modified <= dest_modified {
+        if src_modified < dest_modified {
             return Ok(true);
         }
     }
@@ -148,7 +148,7 @@ pub async fn preprocess_file(
     } else {
         destination.to_path_buf()
     };
-    if let Some(parent) = dest_path.parent() {
+    if parents && let Some(parent) = dest_path.parent() {
         plan.add_directory(parent.to_path_buf());
     }
     if resume && should_skip_file(source, &dest_path).await? {
@@ -216,19 +216,9 @@ pub async fn preprocess_multiple(
     let mut plan = CopyPlan::new();
     for source in sources {
         let metadata = tokio::fs::metadata(source).await?;
-        let file_name = source
-            .file_name()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "Invalid source path"))?;
-        let dest_path = if parents {
-            with_parents(destination, source)
-        } else {
-            destination.join(file_name)
-        };
-        if let Some(parent) = dest_path.parent() {
-            plan.add_directory(parent.to_path_buf());
-        }
+
         if metadata.is_dir() {
-            let dir_plan = preprocess_directory(source, &dest_path, resume, parents).await?;
+            let dir_plan = preprocess_directory(source, destination, resume, parents).await?;
             plan.files.extend(dir_plan.files);
             plan.directories.extend(dir_plan.directories);
             plan.total_size += dir_plan.total_size;
@@ -236,6 +226,20 @@ pub async fn preprocess_multiple(
             plan.skipped_files += dir_plan.skipped_files;
             plan.skipped_size += dir_plan.skipped_size;
         } else {
+            let file_name = source.file_name().ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidInput, "Invalid source path")
+            })?;
+
+            let dest_path = if parents {
+                with_parents(destination, source)
+            } else {
+                destination.join(file_name)
+            };
+
+            if parents && let Some(parent) = dest_path.parent() {
+                plan.add_directory(parent.to_path_buf());
+            }
+
             if resume && should_skip_file(source, &dest_path).await? {
                 plan.mark_skipped(metadata.len());
             } else {
