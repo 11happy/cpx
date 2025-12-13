@@ -6,15 +6,13 @@ pub struct CLIArgs {
     #[arg(required = true)]
     pub sources: Vec<PathBuf>,
 
-    /// Destination path (used without -t/--target-directory)
-    #[arg(last = true)]
-    pub destination: Option<PathBuf>,
+    #[arg(required = true)]
+    pub destination: PathBuf,
 
     #[arg(
         short = 't',
         long = "target-directory",
         value_name = "DIRECTORY",
-        conflicts_with = "destination",
         help = "copy all SOURCE arguments into DIRECTORY"
     )]
     pub target_directory: Option<PathBuf>,
@@ -77,19 +75,16 @@ impl From<&CLIArgs> for CopyOptions {
 }
 
 impl CLIArgs {
-    pub fn validate(self) -> Result<(Vec<PathBuf>, PathBuf, CopyOptions), String> {
+    pub fn validate(mut self) -> Result<(Vec<PathBuf>, PathBuf, CopyOptions), String> {
         let options = CopyOptions::from(&self);
 
-        let destination = if let Some(target) = self.target_directory {
-            target
-        } else if let Some(dest) = self.destination {
-            dest
+        let (sources, destination) = if let Some(target) = self.target_directory {
+            self.sources.push(self.destination);
+            (self.sources, target)
         } else {
-            return Err(
-                "Missing destination: specify last argument or use --target-directory".to_string(),
-            );
+            (self.sources, self.destination)
         };
 
-        Ok((self.sources, destination, options))
+        Ok((sources, destination, options))
     }
 }

@@ -80,7 +80,7 @@ async fn execute_copy(
     }
 
     let multi_progress = MultiProgress::new();
-    let overall_pb = if plan.total_files > 1 && !options.interactive {
+    let overall_pb = if plan.total_files >= 1 && !options.interactive {
         let pb = multi_progress.add(ProgressBar::new(plan.total_size));
         pb.set_message(format!("Copying {} files", plan.total_files));
         style.apply(&pb);
