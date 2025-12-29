@@ -104,9 +104,9 @@ pub async fn preprocess_file(
     resume: bool,
     parents: bool,
 ) -> io::Result<CopyPlan> {
-    let metadata = tokio::fs::metadata(source).await?;
+    let src_metadata = tokio::fs::metadata(source).await?;
 
-    if metadata.is_dir() {
+    if src_metadata.is_dir() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!("'{}' is a directory", source.display()),
@@ -152,9 +152,9 @@ pub async fn preprocess_file(
         plan.add_directory(parent.to_path_buf());
     }
     if resume && should_skip_file(source, &dest_path).await? {
-        plan.mark_skipped(metadata.len());
+        plan.mark_skipped(src_metadata.len());
     } else {
-        plan.add_file(source.to_path_buf(), dest_path, metadata.len());
+        plan.add_file(source.to_path_buf(), dest_path, src_metadata.len());
     }
     Ok(plan)
 }

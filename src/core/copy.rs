@@ -3,6 +3,7 @@ use crate::utility::helper::prompt_overwrite;
 use crate::utility::preprocess::{
     CopyPlan, preprocess_directory, preprocess_file, preprocess_multiple,
 };
+use crate::utility::preserve::{self, PreserveAttr};
 use crate::utility::progress_bar::ProgressBarStyle;
 use indicatif::{MultiProgress, ProgressBar};
 use std::io::{self};
@@ -10,16 +11,15 @@ use std::sync::Arc;
 use std::{path::Path, path::PathBuf};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::sync::Semaphore;
-
 pub async fn copy(
     source: &Path,
     destination: &Path,
     style: ProgressBarStyle,
     options: &CopyOptions,
 ) -> io::Result<()> {
-    let metadata_src = tokio::fs::metadata(source).await?;
+    let src_metadata = tokio::fs::metadata(source).await?;
 
-    let plan = if metadata_src.is_dir() {
+    let plan = if src_metadata.is_dir() {
         if !options.recursive {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -230,5 +230,8 @@ async fn copy_core(
         }
     }
     dest_file.flush().await?;
+    if options.preserve != PreserveAttr::none() {
+        preserve::apply_preserve_attrs(source, destination, options.preserve).await?;
+    }
     Ok(())
 }
