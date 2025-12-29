@@ -201,7 +201,7 @@ async fn copy_core(
     } else if file_size < 512 * 1024 * 1024 {
         1024 * 1024
     } else {
-        4 * 1024 * 1024
+        2 * 1024 * 1024
     };
 
     let mut src_file = tokio::io::BufReader::with_capacity(buffer_size, src_file);
