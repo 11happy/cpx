@@ -1,5 +1,5 @@
 use crate::cli::args::CopyOptions;
-use crate::utility::helper::prompt_overwrite;
+use crate::utility::helper::{prompt_overwrite, truncate_filename};
 use crate::utility::preprocess::{
     CopyPlan, preprocess_directory, preprocess_file, preprocess_multiple,
 };
@@ -115,7 +115,7 @@ async fn execute_copy(
                     .file_name()
                     .map(|n| n.to_string_lossy().to_string())
                     .unwrap_or_else(|| "unknown".to_string());
-                pb.set_message(format!(" {}", file_name));
+                pb.set_message(format!(" {}", truncate_filename(&file_name, 18)));
                 style_cloned.apply(&pb);
                 pb
             };

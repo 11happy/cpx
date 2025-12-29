@@ -24,6 +24,14 @@ pub fn with_parents(dest: &Path, source: &Path) -> PathBuf {
 
     dest.join(relative)
 }
+pub fn truncate_filename(filename: &str, max_len: usize) -> String {
+    if filename.len() <= max_len {
+        filename.to_string()
+    } else {
+        let truncate_at = max_len.saturating_sub(3);
+        format!("{}...", &filename[..truncate_at])
+    }
+}
 
 #[cfg(test)]
 mod tests {
