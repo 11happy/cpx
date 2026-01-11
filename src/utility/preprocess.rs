@@ -11,10 +11,16 @@ pub struct FileTask {
     pub size: u64,
 }
 
+#[derive(Debug, Clone)]
+pub struct DirectoryTask {
+    pub source: Option<PathBuf>,
+    pub destination: PathBuf,
+}
+
 #[derive(Debug)]
 pub struct CopyPlan {
     pub files: Vec<FileTask>,
-    pub directories: Vec<PathBuf>,
+    pub directories: Vec<DirectoryTask>,
     pub total_size: u64,
     pub total_files: usize,
     pub skipped_files: usize,
@@ -42,8 +48,11 @@ impl CopyPlan {
         self.total_files += 1;
     }
 
-    pub fn add_directory(&mut self, path: PathBuf) {
-        self.directories.push(path);
+    pub fn add_directory(&mut self, source: Option<PathBuf>, destination: PathBuf) {
+        self.directories.push(DirectoryTask {
+            source,
+            destination,
+        });
     }
 
     pub fn mark_skipped(&mut self, size: u64) {
@@ -149,7 +158,7 @@ pub async fn preprocess_file(
         destination.to_path_buf()
     };
     if parents && let Some(parent) = dest_path.parent() {
-        plan.add_directory(parent.to_path_buf());
+        plan.add_directory(None, parent.to_path_buf());
     }
     if resume && should_skip_file(source, &dest_path).await? {
         plan.mark_skipped(src_metadata.len());
@@ -177,7 +186,7 @@ pub async fn preprocess_directory(
     let mut stack = vec![(source.to_path_buf(), root_destination)];
 
     while let Some((src_dir, dest_dir)) = stack.pop() {
-        plan.add_directory(dest_dir.clone());
+        plan.add_directory(Some(src_dir.clone()), dest_dir.clone());
         let mut entries = tokio::fs::read_dir(&src_dir).await?;
         while let Some(entry) = entries.next_entry().await? {
             let src_path = entry.path();
@@ -237,7 +246,7 @@ pub async fn preprocess_multiple(
             };
 
             if parents && let Some(parent) = dest_path.parent() {
-                plan.add_directory(parent.to_path_buf());
+                plan.add_directory(None, parent.to_path_buf());
             }
 
             if resume && should_skip_file(source, &dest_path).await? {

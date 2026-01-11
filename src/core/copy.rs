@@ -70,15 +70,29 @@ async fn execute_copy(
     style: ProgressBarStyle,
     options: &CopyOptions,
 ) -> io::Result<()> {
-    for dir in &plan.directories {
-        if let Err(e) = tokio::fs::create_dir_all(dir).await {
-            if e.kind() != io::ErrorKind::AlreadyExists {
-                return Err(e);
+    if !options.attributes_only {
+        for dir in &plan.directories {
+            if let Err(e) = tokio::fs::create_dir_all(&dir.destination).await {
+                if e.kind() != io::ErrorKind::AlreadyExists {
+                    return Err(e);
+                }
+            }
+        }
+    } else {
+        for dir_task in &plan.directories {
+            if let Some(src) = &dir_task.source {
+                if tokio::fs::symlink_metadata(&dir_task.destination)
+                    .await
+                    .is_ok()
+                {
+                    preserve::apply_preserve_attrs(src, &dir_task.destination, options.preserve)
+                        .await?;
+                }
             }
         }
     }
 
-    let overall_pb = if plan.total_files >= 1 && !options.interactive {
+    let overall_pb = if plan.total_files >= 1 && !options.interactive && !options.attributes_only {
         let pb = ProgressBar::new(plan.total_size);
         style.apply(&pb, plan.total_files);
         Some(Arc::new(pb))
@@ -137,7 +151,7 @@ async fn execute_copy(
 
     if let Some(pb) = overall_pb {
         if errors.is_empty() {
-            if matches!(style, ProgressBarStyle::Default) {
+            if matches!(style, ProgressBarStyle::Default) && !options.attributes_only {
                 pb.finish_with_message(format!("Copied {} files successfully", plan.total_files)); // TODO: see a good message
             } else {
                 pb.finish_with_message(format!("Done")); // TODO: see a good message
@@ -167,6 +181,13 @@ async fn copy_core(
     total_files: usize,
     options: CopyOptions,
 ) -> io::Result<()> {
+    if options.attributes_only {
+        if tokio::fs::symlink_metadata(destination).await.is_err() {
+            return Ok(());
+        }
+        preserve::apply_preserve_attrs(source, destination, options.preserve).await?;
+        return Ok(());
+    }
     let src_file = tokio::fs::File::open(source).await?;
 
     if options.interactive && tokio::fs::metadata(destination).await.is_ok() {

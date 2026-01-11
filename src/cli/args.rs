@@ -59,6 +59,12 @@ pub struct CLIArgs {
         help = "preserve the specified attributes"
     )]
     pub preserve: Option<String>,
+
+    #[arg(
+        long = "attributes-only",
+        help = "don't copy the file data, just the attributes"
+    )]
+    pub attributes_only: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -70,6 +76,7 @@ pub struct CopyOptions {
     pub interactive: bool,
     pub parents: bool,
     pub preserve: PreserveAttr,
+    pub attributes_only: bool,
 }
 
 impl From<&CLIArgs> for CopyOptions {
@@ -87,14 +94,17 @@ impl From<&CLIArgs> for CopyOptions {
                     PreserveAttr::from_string(s).expect("unable to parse preserve attribute")
                 }
             },
+            attributes_only: cli.attributes_only,
         }
     }
 }
 
 impl CLIArgs {
     pub fn validate(mut self) -> Result<(Vec<PathBuf>, PathBuf, CopyOptions), String> {
-        let options = CopyOptions::from(&self);
-
+        let mut options = CopyOptions::from(&self);
+        if options.attributes_only {
+            options.preserve = PreserveAttr::all();
+        }
         let (sources, destination) = if let Some(target) = self.target_directory {
             self.sources.push(self.destination);
             (self.sources, target)
