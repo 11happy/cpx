@@ -164,6 +164,7 @@ async fn execute_copy(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn copy_core(
     source: &Path,
     destination: &Path,
