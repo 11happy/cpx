@@ -2,7 +2,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 pub fn create_directories(dirs: &[crate::utility::preprocess::DirectoryTask]) -> io::Result<()> {
-    let mut dirs = dirs.to_vec();
+    let mut dirs: Vec<_> = dirs.iter().collect();
     dirs.sort_by_key(|d| d.destination.components().count());
     for dir in &dirs {
         match std::fs::create_dir(&dir.destination) {

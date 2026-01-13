@@ -102,9 +102,10 @@ pub fn should_skip_file(source: &Path, destination: &Path) -> io::Result<bool> {
 
     if let (Ok(src_modified), Ok(dest_modified)) =
         (src_metadata.modified(), dest_metadata.modified())
-        && src_modified < dest_modified {
-            return Ok(true);
-        }
+        && src_modified < dest_modified
+    {
+        return Ok(true);
+    }
 
     let src_checksum = calculate_checksum(source)?;
     let dest_checksum = calculate_checksum(destination)?;
@@ -188,11 +189,10 @@ pub fn preprocess_directory(
                 io::Error::new(io::ErrorKind::InvalidInput, "Invalid source path")
             })?)
         };
-    plan.add_directory(Some(source.to_path_buf()), root_destination.clone());
+    plan.add_directory(Some(source.into()), root_destination.clone());
     let num_threads = num_cpus::get().min(8);
     for entry in WalkDir::new(source)
         .skip_hidden(false)
-        .sort(true)
         .parallelism(jwalk::Parallelism::RayonNewPool(num_threads))
     {
         let entry = entry?;

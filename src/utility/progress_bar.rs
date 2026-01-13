@@ -1,7 +1,6 @@
 use indicatif::{ProgressBar, ProgressStyle};
 
-#[derive(Debug, Clone, Copy)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, Default)]
 pub enum ProgressBarStyle {
     #[default]
     Default,
@@ -33,4 +32,3 @@ impl ProgressBarStyle {
         }
     }
 }
-

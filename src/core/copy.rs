@@ -35,12 +35,13 @@ pub async fn copy(
         }
 
         if let Ok(dest_meta) = tokio::fs::metadata(destination).await
-            && dest_meta.is_file() {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!("'{}' is a file, expected directory", destination.display()),
-                ));
-            }
+            && dest_meta.is_file()
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("'{}' is a file, expected directory", destination.display()),
+            ));
+        }
 
         preprocess_directory(source, destination, options.resume, options.parents)?
     } else {
@@ -79,10 +80,10 @@ async fn execute_copy(
                 && tokio::fs::symlink_metadata(&dir_task.destination)
                     .await
                     .is_ok()
-                {
-                    preserve::apply_preserve_attrs(src, &dir_task.destination, options.preserve)
-                        .await?;
-                }
+            {
+                preserve::apply_preserve_attrs(src, &dir_task.destination, options.preserve)
+                    .await?;
+            }
         }
     }
 
@@ -115,8 +116,6 @@ async fn execute_copy(
                 .acquire()
                 .await
                 .map_err(|_| io::Error::other("Semaphore closed"))?;
-
-            
 
             copy_core(
                 &file_task.source,
@@ -156,9 +155,10 @@ async fn execute_copy(
     }
 
     if !errors.is_empty() {
-        return Err(io::Error::other(
-            format!("Errors occurred:\n{}", errors.join("\n")),
-        ));
+        return Err(io::Error::other(format!(
+            "Errors occurred:\n{}",
+            errors.join("\n")
+        )));
     }
 
     Ok(())
@@ -184,10 +184,9 @@ async fn copy_core(
     let src_file = tokio::fs::File::open(source).await?;
     if options.interactive || options.remove_destination {
         let exists = tokio::fs::try_exists(destination).await.unwrap_or(false);
-        if options.interactive && exists
-            && !prompt_overwrite(destination)? {
-                return Ok(());
-            }
+        if options.interactive && exists && !prompt_overwrite(destination)? {
+            return Ok(());
+        }
         if options.remove_destination && exists {
             tokio::fs::remove_file(destination).await?;
         }
@@ -261,9 +260,10 @@ async fn copy_core(
         }
     }
     if accumulated_bytes > 0
-        && let Some(pb) = overall_pb {
-            pb.inc(accumulated_bytes);
-        }
+        && let Some(pb) = overall_pb
+    {
+        pb.inc(accumulated_bytes);
+    }
     dest_file.flush().await?;
     let completed = completed_files.fetch_add(1, Ordering::Relaxed) + 1;
     if let Some(pb) = overall_pb

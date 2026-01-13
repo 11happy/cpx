@@ -106,14 +106,11 @@ async fn preserve_timestamps(
 ) -> io::Result<()> {
     use filetime::{FileTime, set_file_mtime};
 
-    let modified_time = src_metadata
-        .modified()
-        .map_err(io::Error::other)?;
+    let modified_time = src_metadata.modified().map_err(io::Error::other)?;
 
     let system_modified_time = FileTime::from_system_time(modified_time);
 
-    set_file_mtime(destination, system_modified_time)
-        .map_err(io::Error::other)?;
+    set_file_mtime(destination, system_modified_time).map_err(io::Error::other)?;
 
     Ok(())
 }
