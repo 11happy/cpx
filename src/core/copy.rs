@@ -189,16 +189,16 @@ async fn copy_core(
         preserve::apply_preserve_attrs(source, destination, options.preserve).await?;
         return Ok(());
     }
-    let src_file = tokio::fs::File::open(source).await?;
-    if options.interactive || options.remove_destination {
-        let exists = tokio::fs::try_exists(destination).await.unwrap_or(false);
-        if options.interactive && exists && !prompt_overwrite(destination)? {
-            return Ok(());
-        }
-        if options.remove_destination && exists {
-            tokio::fs::remove_file(destination).await?;
-        }
+    if options.remove_destination {
+        let _ = tokio::fs::remove_file(destination).await;
     }
+    if options.interactive
+        && tokio::fs::try_exists(destination).await.unwrap_or(false)
+        && !prompt_overwrite(destination)?
+    {
+        return Ok(());
+    }
+
     #[cfg(target_os = "linux")]
     match fast_copy(source, destination, file_size, overall_pb, options) {
         Ok(true) => {
@@ -217,6 +217,7 @@ async fn copy_core(
             // Fallback to regular
         }
     }
+    let mut src_file = tokio::fs::File::open(source).await?;
     let dest_file = match tokio::fs::File::create(destination).await {
         Ok(file) => file,
         Err(_e) if options.force => {
@@ -238,7 +239,6 @@ async fn copy_core(
         2 * 1024 * 1024
     };
 
-    let mut src_file = tokio::io::BufReader::with_capacity(buffer_size, src_file);
     let mut dest_file = tokio::io::BufWriter::with_capacity(buffer_size, dest_file);
 
     let mut buffer = vec![0u8; buffer_size];
