@@ -28,7 +28,7 @@ pub fn fast_copy(
         }
         Err(e) => return Err(e),
     };
-    const TARGET_UPDATES: u64 = 128;
+    const TARGET_UPDATES: u64 = 16;
     const MIN_CHUNK: usize = 4 * 1024 * 1024;
     let chunk_size = std::cmp::max(MIN_CHUNK, (file_size / TARGET_UPDATES) as usize);
     let mut total_copied = 0u64;

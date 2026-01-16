@@ -236,7 +236,7 @@ async fn copy_core(
 
     let mut buffer = vec![0u8; buffer_size];
 
-    const MAX_UPDATES: u64 = 128;
+    const MAX_UPDATES: u64 = 16;
     let update_threshold = if file_size > MAX_UPDATES * buffer_size as u64 {
         file_size / MAX_UPDATES
     } else {
