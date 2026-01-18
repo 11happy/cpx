@@ -1,7 +1,9 @@
 use crate::cli::args::CopyOptions;
 #[cfg(target_os = "linux")]
 use crate::core::fast_copy::fast_copy;
-use crate::utility::helper::{create_directories, create_symlink, prompt_overwrite};
+use crate::utility::helper::{
+    create_directories, create_hardlink, create_symlink, prompt_overwrite,
+};
 use crate::utility::preprocess::{
     CopyPlan, preprocess_directory, preprocess_file, preprocess_multiple,
 };
@@ -21,7 +23,7 @@ pub async fn copy(
     style: ProgressBarStyle,
     options: &CopyOptions,
 ) -> io::Result<()> {
-    let source_metadata = tokio::fs::metadata(source).await?;
+    let source_metadata = tokio::fs::symlink_metadata(source).await?;
     let destination_metadata = tokio::fs::metadata(destination).await.ok();
     let plan = if source_metadata.is_dir() {
         if !options.recursive {
@@ -92,7 +94,22 @@ async fn execute_copy(
             }
         }
     }
+    if options.hard_link {
+        for hardlink_task in &plan.hardlinks {
+            if let Err(e) = create_hardlink(hardlink_task, options).await {
+                eprintln!(
+                    "Failed to create hardlink {:?} -> {:?}: {}",
+                    hardlink_task.destination, hardlink_task.source, e
+                );
+                return Err(e);
+            }
+        }
 
+        if plan.total_hardlinks > 0 {
+            println!("Created {} hard links", plan.total_hardlinks);
+        }
+        return Ok(());
+    }
     if options.symbolic_link.is_some() {
         for symlink_task in &plan.symlinks {
             if let Err(e) = create_symlink(symlink_task).await {
@@ -299,4 +316,646 @@ async fn copy_core(
         preserve::apply_preserve_attrs(source, destination, options.preserve).await?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cli::args::{CopyOptions, SymlinkMode};
+    use crate::utility::progress_bar::ProgressBarStyle;
+    use std::fs;
+    #[cfg(unix)]
+    use std::os::unix::fs::MetadataExt;
+    use tempfile::TempDir;
+
+    fn create_test_file(path: &std::path::Path, content: &[u8]) -> io::Result<()> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(path, content)
+    }
+
+    #[tokio::test]
+    async fn test_copy_single_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let source = temp_dir.path().join("source.txt");
+        let dest = temp_dir.path().join("dest.txt");
+
+        let content = b"Hello, World!";
+        create_test_file(&source, content).unwrap();
+
+        let options = CopyOptions::none();
+        copy(&source, &dest, ProgressBarStyle::Minimal, &options)
+            .await
+            .unwrap();
+
+        assert!(dest.exists());
+        let dest_content = fs::read(&dest).unwrap();
+        assert_eq!(dest_content, content);
+    }
+
+    #[tokio::test]
+    async fn test_copy_file_to_directory() {
+        let temp_dir = TempDir::new().unwrap();
+        let source = temp_dir.path().join("source.txt");
+        let dest_dir = temp_dir.path().join("dest");
+
+        create_test_file(&source, b"content").unwrap();
+        fs::create_dir(&dest_dir).unwrap();
+
+        let options = CopyOptions::none();
+        copy(&source, &dest_dir, ProgressBarStyle::Minimal, &options)
+            .await
+            .unwrap();
+
+        let dest_file = dest_dir.join("source.txt");
+        assert!(dest_file.exists());
+        assert_eq!(fs::read(&dest_file).unwrap(), b"content");
+    }
+
+    #[tokio::test]
+    async fn test_copy_large_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let source = temp_dir.path().join("large.bin");
+        let dest = temp_dir.path().join("large_copy.bin");
+
+        let content = vec![0xAB; 10 * 1024 * 1024];
+        create_test_file(&source, &content).unwrap();
+
+        let options = CopyOptions::none();
+        copy(&source, &dest, ProgressBarStyle::Minimal, &options)
+            .await
+            .unwrap();
+
+        assert!(dest.exists());
+        assert_eq!(fs::metadata(&dest).unwrap().len(), content.len() as u64);
+    }
+
+    #[tokio::test]
+    async fn test_copy_empty_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let source = temp_dir.path().join("empty.txt");
+        let dest = temp_dir.path().join("empty_copy.txt");
+
+        create_test_file(&source, b"").unwrap();
+
+        let options = CopyOptions::none();
+        copy(&source, &dest, ProgressBarStyle::Minimal, &options)
+            .await
+            .unwrap();
+
+        assert!(dest.exists());
+        assert_eq!(fs::metadata(&dest).unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_copy_directory_recursive() {
+        let temp_dir = TempDir::new().unwrap();
+        let source_dir = temp_dir.path().join("source");
+        let dest_dir = temp_dir.path().join("dest");
+
+        fs::create_dir_all(&source_dir).unwrap();
+        create_test_file(&source_dir.join("file1.txt"), b"content1").unwrap();
+        create_test_file(&source_dir.join("file2.txt"), b"content2").unwrap();
+
+        let subdir = source_dir.join("subdir");
+        fs::create_dir(&subdir).unwrap();
+        create_test_file(&subdir.join("file3.txt"), b"content3").unwrap();
+
+        let mut options = CopyOptions::none();
+        options.recursive = true;
+
+        copy(&source_dir, &dest_dir, ProgressBarStyle::Minimal, &options)
+            .await
+            .unwrap();
+
+        assert!(dest_dir.join("source").is_dir());
+        assert!(dest_dir.join("source/file1.txt").exists());
+        assert!(dest_dir.join("source/file2.txt").exists());
+        assert!(dest_dir.join("source/subdir/file3.txt").exists());
+
+        assert_eq!(
+            fs::read(dest_dir.join("source/file1.txt")).unwrap(),
+            b"content1"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_copy_directory_without_recursive_fails() {
+        let temp_dir = TempDir::new().unwrap();
+        let source_dir = temp_dir.path().join("source");
+        let dest_dir = temp_dir.path().join("dest");
+
+        fs::create_dir(&source_dir).unwrap();
+
+        let options = CopyOptions::none();
+        let result = copy(&source_dir, &dest_dir, ProgressBarStyle::Minimal, &options).await;
+
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("use -r to copy recursively")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_copy_nested_directories() {
+        let temp_dir = TempDir::new().unwrap();
+        let source = temp_dir.path().join("a/b/c/d");
+        fs::create_dir_all(&source).unwrap();
+        create_test_file(&source.join("deep.txt"), b"deep file").unwrap();
+
+        let dest = temp_dir.path().join("dest");
+
+        let mut options = CopyOptions::none();
+        options.recursive = true;
+
+        copy(
+            &temp_dir.path().join("a"),
+            &dest,
+            ProgressBarStyle::Minimal,
+            &options,
+        )
+        .await
+        .unwrap();
+
+        assert!(dest.join("a/b/c/d/deep.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn test_multiple_copy() {
+        let temp_dir = TempDir::new().unwrap();
+        let dest_dir = temp_dir.path().join("dest");
+        fs::create_dir(&dest_dir).unwrap();
+
+        let file1 = temp_dir.path().join("file1.txt");
+        let file2 = temp_dir.path().join("file2.txt");
+        let file3 = temp_dir.path().join("file3.txt");
+
+        create_test_file(&file1, b"content1").unwrap();
+        create_test_file(&file2, b"content2").unwrap();
+        create_test_file(&file3, b"content3").unwrap();
+
+        let sources = vec![file1, file2, file3];
+        let options = CopyOptions::none();
+
+        multiple_copy(
+            sources,
+            dest_dir.clone(),
+            ProgressBarStyle::Minimal,
+            &options,
+        )
+        .await
+        .unwrap();
+
+        assert!(dest_dir.join("file1.txt").exists());
+        assert!(dest_dir.join("file2.txt").exists());
+        assert!(dest_dir.join("file3.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn test_multiple_copy_with_directories() {
+        let temp_dir = TempDir::new().unwrap();
+        let dest_dir = temp_dir.path().join("dest");
+        fs::create_dir(&dest_dir).unwrap();
+
+        let file1 = temp_dir.path().join("file.txt");
+        create_test_file(&file1, b"file content").unwrap();
+
+        let dir1 = temp_dir.path().join("dir1");
+        fs::create_dir(&dir1).unwrap();
+        create_test_file(&dir1.join("file_in_dir.txt"), b"dir content").unwrap();
+
+        let sources = vec![file1, dir1];
+        let mut options = CopyOptions::none();
+        options.recursive = true;
+
+        multiple_copy(
+            sources,
+            dest_dir.clone(),
+            ProgressBarStyle::Minimal,
+            &options,
+        )
+        .await
+        .unwrap();
+
+        assert!(dest_dir.join("file.txt").exists());
+        assert!(dest_dir.join("dir1/file_in_dir.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn test_copy_with_force_overwrites() {
+        let temp_dir = TempDir::new().unwrap();
+        let source = temp_dir.path().join("source.txt");
+        let dest = temp_dir.path().join("dest.txt");
+
+        create_test_file(&source, b"new content").unwrap();
+        create_test_file(&dest, b"old content").unwrap();
+
+        let mut options = CopyOptions::none();
+        options.force = true;
+
+        copy(&source, &dest, ProgressBarStyle::Minimal, &options)
+            .await
+            .unwrap();
+
+        assert_eq!(fs::read(&dest).unwrap(), b"new content");
+    }
+
+    #[tokio::test]
+    async fn test_copy_without_force_fails_on_existing() {
+        let temp_dir = TempDir::new().unwrap();
+        let source = temp_dir.path().join("source.txt");
+        let dest = temp_dir.path().join("dest.txt");
+
+        create_test_file(&source, b"new content").unwrap();
+        create_test_file(&dest, b"old content").unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&dest).unwrap().permissions();
+            perms.set_mode(0o444);
+            fs::set_permissions(&dest, perms).unwrap();
+        }
+
+        let options = CopyOptions::none();
+        let result = copy(&source, &dest, ProgressBarStyle::Minimal, &options).await;
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&dest).unwrap().permissions();
+            perms.set_mode(0o644);
+            fs::set_permissions(&dest, perms).unwrap();
+        }
+
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_copy_with_remove_destination() {
+        let temp_dir = TempDir::new().unwrap();
+        let source = temp_dir.path().join("source.txt");
+        let dest = temp_dir.path().join("dest.txt");
+
+        create_test_file(&source, b"new content").unwrap();
+        create_test_file(&dest, b"old content").unwrap();
+
+        let mut options = CopyOptions::none();
+        options.remove_destination = true;
+
+        copy(&source, &dest, ProgressBarStyle::Minimal, &options)
+            .await
+            .unwrap();
+
+        assert_eq!(fs::read(&dest).unwrap(), b"new content");
+    }
+
+    #[tokio::test]
+    async fn test_copy_with_resume_skips_existing() {
+        let temp_dir = TempDir::new().unwrap();
+        let source_dir = temp_dir.path().join("source");
+        let dest_dir = temp_dir.path().join("dest");
+
+        fs::create_dir_all(&source_dir).unwrap();
+        fs::create_dir_all(&dest_dir).unwrap();
+
+        create_test_file(&source_dir.join("file1.txt"), b"content1").unwrap();
+        create_test_file(&source_dir.join("file2.txt"), b"content2").unwrap();
+
+        create_test_file(&dest_dir.join("source/file1.txt"), b"content1").unwrap();
+
+        let mut options = CopyOptions::none();
+        options.recursive = true;
+        options.resume = true;
+
+        copy(&source_dir, &dest_dir, ProgressBarStyle::Minimal, &options)
+            .await
+            .unwrap();
+
+        assert!(dest_dir.join("source/file1.txt").exists());
+        assert!(dest_dir.join("source/file2.txt").exists());
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_hardlink_single_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let source = temp_dir.path().join("source.txt");
+        let dest = temp_dir.path().join("dest.txt");
+
+        create_test_file(&source, b"test content").unwrap();
+
+        let mut options = CopyOptions::none();
+        options.hard_link = true;
+
+        copy(&source, &dest, ProgressBarStyle::Minimal, &options)
+            .await
+            .unwrap();
+
+        assert!(dest.exists());
+
+        let source_meta = fs::metadata(&source).unwrap();
+        let dest_meta = fs::metadata(&dest).unwrap();
+        assert_eq!(source_meta.ino(), dest_meta.ino());
+        assert_eq!(source_meta.nlink(), 2);
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_hardlink_multiple_files() {
+        let temp_dir = TempDir::new().unwrap();
+        let dest_dir = temp_dir.path().join("dest");
+        fs::create_dir(&dest_dir).unwrap();
+
+        let file1 = temp_dir.path().join("file1.txt");
+        let file2 = temp_dir.path().join("file2.txt");
+
+        create_test_file(&file1, b"content1").unwrap();
+        create_test_file(&file2, b"content2").unwrap();
+
+        let sources = vec![file1.clone(), file2.clone()];
+
+        let mut options = CopyOptions::none();
+        options.hard_link = true;
+
+        multiple_copy(
+            sources,
+            dest_dir.clone(),
+            ProgressBarStyle::Minimal,
+            &options,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            fs::metadata(&file1).unwrap().ino(),
+            fs::metadata(dest_dir.join("file1.txt")).unwrap().ino()
+        );
+        assert_eq!(
+            fs::metadata(&file2).unwrap().ino(),
+            fs::metadata(dest_dir.join("file2.txt")).unwrap().ino()
+        );
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_hardlink_recursive() {
+        let temp_dir = TempDir::new().unwrap();
+        let source_dir = temp_dir.path().join("source");
+        let dest_dir = temp_dir.path().join("dest");
+
+        fs::create_dir_all(&source_dir).unwrap();
+        create_test_file(&source_dir.join("file.txt"), b"content").unwrap();
+
+        let mut options = CopyOptions::none();
+        options.hard_link = true;
+        options.recursive = true;
+
+        copy(&source_dir, &dest_dir, ProgressBarStyle::Minimal, &options)
+            .await
+            .unwrap();
+
+        let source_file = source_dir.join("file.txt");
+        let dest_file = dest_dir.join("source/file.txt");
+
+        assert_eq!(
+            fs::metadata(&source_file).unwrap().ino(),
+            fs::metadata(&dest_file).unwrap().ino()
+        );
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_hardlink_with_force() {
+        let temp_dir = TempDir::new().unwrap();
+        let source = temp_dir.path().join("source.txt");
+        let dest = temp_dir.path().join("dest.txt");
+
+        create_test_file(&source, b"new").unwrap();
+        create_test_file(&dest, b"old").unwrap();
+
+        let mut options = CopyOptions::none();
+        options.hard_link = true;
+        options.force = true;
+
+        copy(&source, &dest, ProgressBarStyle::Minimal, &options)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            fs::metadata(&source).unwrap().ino(),
+            fs::metadata(&dest).unwrap().ino()
+        );
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_symlink_single_file_auto() {
+        let temp_dir = TempDir::new().unwrap();
+        let source = temp_dir.path().join("source.txt");
+        let dest = temp_dir.path().join("link.txt");
+
+        create_test_file(&source, b"content").unwrap();
+
+        let mut options = CopyOptions::none();
+        options.symbolic_link = Some(SymlinkMode::Auto);
+
+        copy(&source, &dest, ProgressBarStyle::Minimal, &options)
+            .await
+            .unwrap();
+
+        assert!(dest.exists());
+        assert!(dest.symlink_metadata().unwrap().is_symlink());
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_symlink_absolute_mode() {
+        let temp_dir = TempDir::new().unwrap();
+        let source = temp_dir.path().join("source.txt");
+        let dest = temp_dir.path().join("link.txt");
+
+        create_test_file(&source, b"content").unwrap();
+
+        let mut options = CopyOptions::none();
+        options.symbolic_link = Some(SymlinkMode::Absolute);
+
+        copy(&source, &dest, ProgressBarStyle::Minimal, &options)
+            .await
+            .unwrap();
+
+        let link_target = fs::read_link(&dest).unwrap();
+        assert!(link_target.is_absolute());
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_symlink_relative_mode() {
+        let temp_dir = TempDir::new().unwrap();
+        let source = temp_dir.path().join("source.txt");
+        let dest_dir = temp_dir.path().join("links");
+        fs::create_dir(&dest_dir).unwrap();
+        let dest = dest_dir.join("link.txt");
+
+        create_test_file(&source, b"content").unwrap();
+
+        let mut options = CopyOptions::none();
+        options.symbolic_link = Some(SymlinkMode::Relative);
+
+        copy(&source, &dest, ProgressBarStyle::Minimal, &options)
+            .await
+            .unwrap();
+
+        let link_target = fs::read_link(&dest).unwrap();
+        assert!(!link_target.is_absolute());
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_symlink_recursive() {
+        let temp_dir = TempDir::new().unwrap();
+        let source_dir = temp_dir.path().join("source");
+        let dest_dir = temp_dir.path().join("dest");
+
+        fs::create_dir_all(&source_dir).unwrap();
+        create_test_file(&source_dir.join("file.txt"), b"content").unwrap();
+
+        let mut options = CopyOptions::none();
+        options.symbolic_link = Some(SymlinkMode::Auto);
+        options.recursive = true;
+
+        copy(&source_dir, &dest_dir, ProgressBarStyle::Minimal, &options)
+            .await
+            .unwrap();
+
+        assert!(
+            dest_dir
+                .join("source/file.txt")
+                .symlink_metadata()
+                .unwrap()
+                .is_symlink()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_copy_nonexistent_source() {
+        let temp_dir = TempDir::new().unwrap();
+        let source = temp_dir.path().join("nonexistent.txt");
+        let dest = temp_dir.path().join("dest.txt");
+
+        let options = CopyOptions::none();
+        let result = copy(&source, &dest, ProgressBarStyle::Minimal, &options).await;
+
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_copy_to_file_when_expecting_directory() {
+        let temp_dir = TempDir::new().unwrap();
+        let source_dir = temp_dir.path().join("source");
+        let dest_file = temp_dir.path().join("dest.txt");
+
+        fs::create_dir(&source_dir).unwrap();
+        create_test_file(&dest_file, b"existing").unwrap();
+
+        let mut options = CopyOptions::none();
+        options.recursive = true;
+
+        let result = copy(&source_dir, &dest_file, ProgressBarStyle::Minimal, &options).await;
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("file"));
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_copy() {
+        let temp_dir = TempDir::new().unwrap();
+        let dest_dir = temp_dir.path().join("dest");
+        fs::create_dir(&dest_dir).unwrap();
+
+        let mut sources = Vec::new();
+        for i in 0..10 {
+            let file = temp_dir.path().join(format!("file{}.txt", i));
+            create_test_file(&file, format!("content{}", i).as_bytes()).unwrap();
+            sources.push(file);
+        }
+
+        let mut options = CopyOptions::none();
+        options.concurrency = 4;
+
+        multiple_copy(
+            sources,
+            dest_dir.clone(),
+            ProgressBarStyle::Minimal,
+            &options,
+        )
+        .await
+        .unwrap();
+
+        for i in 0..10 {
+            assert!(dest_dir.join(format!("file{}.txt", i)).exists());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_copy_with_different_progress_styles() {
+        let temp_dir = TempDir::new().unwrap();
+        let source = temp_dir.path().join("source.txt");
+        let dest1 = temp_dir.path().join("dest1.txt");
+        let dest2 = temp_dir.path().join("dest2.txt");
+
+        create_test_file(&source, b"content").unwrap();
+
+        let options = CopyOptions::none();
+
+        copy(&source, &dest1, ProgressBarStyle::Default, &options)
+            .await
+            .unwrap();
+        copy(&source, &dest2, ProgressBarStyle::Minimal, &options)
+            .await
+            .unwrap();
+
+        assert!(dest1.exists());
+        assert!(dest2.exists());
+    }
+
+    #[tokio::test]
+    async fn test_copy_file_with_special_characters() {
+        let temp_dir = TempDir::new().unwrap();
+        let source = temp_dir.path().join("file with spaces & special!.txt");
+        let dest = temp_dir.path().join("dest with spaces.txt");
+
+        create_test_file(&source, b"content").unwrap();
+
+        let options = CopyOptions::none();
+        copy(&source, &dest, ProgressBarStyle::Minimal, &options)
+            .await
+            .unwrap();
+
+        assert!(dest.exists());
+    }
+
+    #[tokio::test]
+    async fn test_copy_preserves_file_size() {
+        let temp_dir = TempDir::new().unwrap();
+        let source = temp_dir.path().join("source.bin");
+        let dest = temp_dir.path().join("dest.bin");
+
+        let content = vec![0xFF; 12345];
+        create_test_file(&source, &content).unwrap();
+
+        let options = CopyOptions::none();
+        copy(&source, &dest, ProgressBarStyle::Minimal, &options)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            fs::metadata(&source).unwrap().len(),
+            fs::metadata(&dest).unwrap().len()
+        );
+    }
 }

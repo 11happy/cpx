@@ -1,3 +1,6 @@
+use crate::cli::args::CopyOptions;
+use crate::utility::preprocess::HardlinkTask;
+
 use super::preprocess::SymlinkTask;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -49,6 +52,50 @@ pub async fn create_symlink(task: &SymlinkTask) -> io::Result<()> {
             tokio::fs::symlink_file(&target, &task.destination).await?;
         }
     }
+
+    Ok(())
+}
+
+pub async fn create_hardlink(task: &HardlinkTask, options: &CopyOptions) -> io::Result<()> {
+    if tokio::fs::try_exists(&task.destination).await? {
+        if options.interactive && !prompt_overwrite(&task.destination)? {
+            return Ok(());
+        }
+
+        if options.force || options.remove_destination {
+            if let Err(e) = tokio::fs::remove_file(&task.destination).await {
+                return Err(io::Error::new(
+                    e.kind(),
+                    format!(
+                        "Cannot remove existing file '{}': {}",
+                        task.destination.display(),
+                        e
+                    ),
+                ));
+            }
+        } else {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!(
+                    "Destination '{}' already exists",
+                    task.destination.display()
+                ),
+            ));
+        }
+    }
+    tokio::fs::hard_link(&task.source, &task.destination)
+        .await
+        .map_err(|e| {
+            io::Error::new(
+                e.kind(),
+                format!(
+                    "Failed to create hard link '{}' -> '{}': {}",
+                    task.source.display(),
+                    task.destination.display(),
+                    e
+                ),
+            )
+        })?;
 
     Ok(())
 }

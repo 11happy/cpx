@@ -25,14 +25,22 @@ pub struct SymlinkTask {
     pub destination: PathBuf,
     pub use_absolute: bool,
 }
+
+#[derive(Debug, Clone)]
+pub struct HardlinkTask {
+    pub source: PathBuf,
+    pub destination: PathBuf,
+}
 #[derive(Debug)]
 pub struct CopyPlan {
     pub files: Vec<FileTask>,
     pub directories: Vec<DirectoryTask>,
     pub symlinks: Vec<SymlinkTask>,
+    pub hardlinks: Vec<HardlinkTask>,
     pub total_size: u64,
     pub total_files: usize,
     pub total_symlinks: usize,
+    pub total_hardlinks: usize,
     pub skipped_files: usize,
     pub skipped_size: u64,
 }
@@ -49,9 +57,11 @@ impl CopyPlan {
             files: Vec::new(),
             directories: Vec::new(),
             symlinks: Vec::new(),
+            hardlinks: Vec::new(),
             total_size: 0,
             total_files: 0,
             total_symlinks: 0,
+            total_hardlinks: 0,
             skipped_files: 0,
             skipped_size: 0,
         }
@@ -79,6 +89,13 @@ impl CopyPlan {
             use_absolute,
         });
         self.total_symlinks += 1;
+    }
+    pub fn add_hardlink(&mut self, source: PathBuf, destination: PathBuf) {
+        self.hardlinks.push(HardlinkTask {
+            source,
+            destination,
+        });
+        self.total_hardlinks += 1;
     }
 
     pub fn mark_skipped(&mut self, size: u64) {
@@ -195,7 +212,9 @@ pub fn preprocess_file(
     {
         plan.add_directory(None, parent.to_path_buf());
     }
-    if let Some(mode) = options.symbolic_link {
+    if options.hard_link {
+        plan.add_hardlink(source.to_path_buf(), dest_path);
+    } else if let Some(mode) = options.symbolic_link {
         let use_absolute = should_use_absolute(source, mode);
         plan.add_symlink(source.to_path_buf(), dest_path, use_absolute);
     } else if options.resume && should_skip_file(source, &dest_path)? {
@@ -243,8 +262,10 @@ pub fn preprocess_directory(
         if metadata.is_dir() {
             plan.add_directory(Some(src_path.to_path_buf()), dest_path);
         } else if metadata.is_file() {
-            if let Some(mode) = options.symbolic_link {
-                let use_absolute = should_use_absolute(source, mode);
+            if options.hard_link {
+                plan.add_hardlink(src_path.to_path_buf(), dest_path);
+            } else if let Some(mode) = options.symbolic_link {
+                let use_absolute = should_use_absolute(&src_path, mode);
                 plan.add_symlink(src_path.to_path_buf(), dest_path, use_absolute);
             } else if options.resume && should_skip_file(&src_path, &dest_path)? {
                 plan.mark_skipped(metadata.len());
@@ -272,7 +293,7 @@ pub fn preprocess_multiple(
 
     let mut plan = CopyPlan::new();
     for source in sources {
-        let metadata = std::fs::metadata(source)?;
+        let metadata = std::fs::symlink_metadata(source)?;
 
         if metadata.is_dir() {
             let dir_plan = preprocess_directory(source, destination, options)?;
@@ -298,7 +319,9 @@ pub fn preprocess_multiple(
             {
                 plan.add_directory(None, parent.to_path_buf());
             }
-            if let Some(mode) = options.symbolic_link {
+            if options.hard_link {
+                plan.add_hardlink(source.to_path_buf(), dest_path);
+            } else if let Some(mode) = options.symbolic_link {
                 let use_absolute = should_use_absolute(source, mode);
                 plan.add_symlink(source.to_path_buf(), dest_path, use_absolute);
             } else if options.resume && should_skip_file(source, &dest_path)? {

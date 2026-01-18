@@ -87,6 +87,13 @@ pub struct CLIArgs {
             help = "make symbolic links instead of copying (auto, absolute, or relative)"
         )]
     pub symbolic_link: Option<SymlinkMode>,
+
+    #[arg(
+        short = 'l',
+        long = "link",
+        help = "hard link files instead of copying"
+    )]
+    pub hard_link: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -101,6 +108,7 @@ pub struct CopyOptions {
     pub attributes_only: bool,
     pub remove_destination: bool,
     pub symbolic_link: Option<SymlinkMode>,
+    pub hard_link: bool,
 }
 
 impl CopyOptions {
@@ -116,6 +124,7 @@ impl CopyOptions {
             attributes_only: false,
             remove_destination: false,
             symbolic_link: None,
+            hard_link: false,
         }
     }
 }
@@ -138,6 +147,7 @@ impl From<&CLIArgs> for CopyOptions {
             attributes_only: cli.attributes_only,
             remove_destination: cli.remove_destination,
             symbolic_link: cli.symbolic_link,
+            hard_link: cli.hard_link,
         }
     }
 }
@@ -145,6 +155,28 @@ impl From<&CLIArgs> for CopyOptions {
 impl CLIArgs {
     pub fn validate(mut self) -> Result<(Vec<PathBuf>, PathBuf, CopyOptions), String> {
         let mut options = CopyOptions::from(&self);
+        if options.symbolic_link.is_some() {
+            if options.hard_link {
+                return Err("--symbolic-link and --link cannot be used together".to_string());
+            }
+            if options.resume {
+                return Err("--symbolic-link and --continue cannot be used together".to_string());
+            }
+            if options.attributes_only {
+                return Err(
+                    "--symbolic-link and --attributes-only cannot be used together".to_string(),
+                );
+            }
+        }
+
+        if options.hard_link {
+            if options.resume {
+                return Err("--link and --continue cannot be used together".to_string());
+            }
+            if options.attributes_only {
+                return Err("--link and --attributes-only cannot be used together".to_string());
+            }
+        }
         if options.attributes_only {
             options.preserve = PreserveAttr::all();
         }
@@ -156,5 +188,109 @@ impl CLIArgs {
         };
 
         Ok((sources, destination, options))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_validate_symlink_and_hardlink_conflict() {
+        let args = CLIArgs {
+            sources: vec![PathBuf::from("source.txt")],
+            destination: PathBuf::from("dest.txt"),
+            target_directory: None,
+            style: None,
+            recursive: false,
+            concurrency: 4,
+            continue_copy: false,
+            force: false,
+            interactive: false,
+            parents: false,
+            preserve: None,
+            attributes_only: false,
+            remove_destination: false,
+            symbolic_link: Some(SymlinkMode::Auto),
+            hard_link: true,
+        };
+
+        let result = args.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("symbolic-link"));
+    }
+
+    #[test]
+    fn test_validate_symlink_and_resume_conflict() {
+        let args = CLIArgs {
+            sources: vec![PathBuf::from("source.txt")],
+            destination: PathBuf::from("dest.txt"),
+            target_directory: None,
+            style: None,
+            recursive: false,
+            concurrency: 4,
+            continue_copy: true,
+            force: false,
+            interactive: false,
+            parents: false,
+            preserve: None,
+            attributes_only: false,
+            remove_destination: false,
+            symbolic_link: Some(SymlinkMode::Auto),
+            hard_link: false,
+        };
+
+        let result = args.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("continue"));
+    }
+
+    #[test]
+    fn test_validate_hardlink_and_resume_conflict() {
+        let args = CLIArgs {
+            sources: vec![PathBuf::from("source.txt")],
+            destination: PathBuf::from("dest.txt"),
+            target_directory: None,
+            style: None,
+            recursive: false,
+            concurrency: 4,
+            continue_copy: true,
+            force: false,
+            interactive: false,
+            parents: false,
+            preserve: None,
+            attributes_only: false,
+            remove_destination: false,
+            symbolic_link: None,
+            hard_link: true,
+        };
+
+        let result = args.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("link"));
+    }
+
+    #[test]
+    fn test_validate_success() {
+        let args = CLIArgs {
+            sources: vec![PathBuf::from("source.txt")],
+            destination: PathBuf::from("dest.txt"),
+            target_directory: None,
+            style: None,
+            recursive: false,
+            concurrency: 4,
+            continue_copy: false,
+            force: false,
+            interactive: false,
+            parents: false,
+            preserve: None,
+            attributes_only: false,
+            remove_destination: false,
+            symbolic_link: None,
+            hard_link: false,
+        };
+
+        let result = args.validate();
+        assert!(result.is_ok());
     }
 }
