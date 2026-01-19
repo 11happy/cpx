@@ -217,10 +217,17 @@ pub fn preprocess_file(
     } else if let Some(mode) = options.symbolic_link {
         let use_absolute = should_use_absolute(source, mode);
         plan.add_symlink(source.to_path_buf(), dest_path, use_absolute);
-    } else if options.resume && should_skip_file(source, &dest_path)? {
-        plan.mark_skipped(source_metadata.len());
     } else {
-        plan.add_file(source.to_path_buf(), dest_path, source_metadata.len());
+        let actual_size = if source_metadata.is_symlink() {
+            std::fs::metadata(source)?.len()
+        } else {
+            source_metadata.len()
+        };
+        if options.resume && should_skip_file(source, &dest_path)? {
+            plan.mark_skipped(actual_size);
+        } else {
+            plan.add_file(source.to_path_buf(), dest_path, actual_size);
+        }
     }
     Ok(plan)
 }
@@ -293,9 +300,9 @@ pub fn preprocess_multiple(
 
     let mut plan = CopyPlan::new();
     for source in sources {
-        let metadata = std::fs::symlink_metadata(source)?;
+        let symlink_metadata = std::fs::symlink_metadata(source)?;
 
-        if metadata.is_dir() {
+        if symlink_metadata.is_dir() {
             let dir_plan = preprocess_directory(source, destination, options)?;
             plan.files.extend(dir_plan.files);
             plan.directories.extend(dir_plan.directories);
@@ -324,10 +331,18 @@ pub fn preprocess_multiple(
             } else if let Some(mode) = options.symbolic_link {
                 let use_absolute = should_use_absolute(source, mode);
                 plan.add_symlink(source.to_path_buf(), dest_path, use_absolute);
-            } else if options.resume && should_skip_file(source, &dest_path)? {
-                plan.mark_skipped(metadata.len());
             } else {
-                plan.add_file(source.clone(), dest_path, metadata.len());
+                let actual_size = if symlink_metadata.is_symlink() {
+                    std::fs::metadata(source)?.len()
+                } else {
+                    symlink_metadata.len()
+                };
+
+                if options.resume && should_skip_file(source, &dest_path)? {
+                    plan.mark_skipped(actual_size);
+                } else {
+                    plan.add_file(source.clone(), dest_path, actual_size);
+                }
             }
         }
     }
