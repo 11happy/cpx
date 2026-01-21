@@ -151,97 +151,192 @@ fn preserve_ownership(destination: &Path, src_metadata: &std::fs::Metadata) -> i
     Ok(())
 }
 
-// #[cfg(test)]
-// mod tests {
-//     use super::*;
-//     use tempfile::TempDir;
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::thread;
+    use std::time::Duration;
+    use tempfile::TempDir;
 
-//     #[test]
-//     fn test_preserve_attr_from_string() {
-//         let attr = PreserveAttr::from_string("mode,timestamps").unwrap();
-//         assert!(attr.mode);
-//         assert!(attr.timestamps);
-//         assert!(!attr.ownership);
-//         assert!(!attr.xattr);
-//     }
+    #[test]
+    fn test_preserve_attr_from_string() {
+        let attr = PreserveAttr::from_string("mode,timestamps").unwrap();
+        assert!(attr.mode);
+        assert!(attr.timestamps);
+        assert!(!attr.ownership);
+        assert!(!attr.xattr);
+    }
 
-//     #[test]
-//     fn test_preserve_attr_all() {
-//         let attr = PreserveAttr::from_string("all").unwrap();
-//         assert!(attr.mode);
-//         assert!(attr.ownership);
-//         assert!(attr.timestamps);
-//         assert!(attr.links);
-//         assert!(attr.context);
-//         assert!(attr.xattr);
-//     }
+    #[test]
+    fn test_preserve_attr_all() {
+        let attr = PreserveAttr::from_string("all").unwrap();
+        assert!(attr.mode);
+        assert!(attr.ownership);
+        assert!(attr.timestamps);
+        assert!(attr.links);
+        assert!(attr.context);
+        assert!(attr.xattr);
+    }
 
-//     #[test]
-//     fn test_preserve_attr_default() {
-//         let attr = PreserveAttr::from_string("").unwrap();
-//         assert!(attr.mode);
-//         assert!(attr.ownership);
-//         assert!(attr.timestamps);
-//         assert!(!attr.links);
-//         assert!(!attr.context);
-//         assert!(!attr.xattr);
-//     }
+    #[test]
+    fn test_preserve_attr_default() {
+        let attr = PreserveAttr::from_string("").unwrap();
+        assert!(attr.mode);
+        assert!(attr.ownership);
+        assert!(attr.timestamps);
+        assert!(!attr.links);
+        assert!(!attr.context);
+        assert!(!attr.xattr);
+    }
 
-//     #[tokio::test]
-//     async fn test_preserve_timestamps() {
-//         let temp_dir = TempDir::new().unwrap();
-//         let source = temp_dir.path().join("source.txt");
-//         let dest = temp_dir.path().join("dest.txt");
+    #[test]
+    fn test_preserve_attr_none() {
+        let attr = PreserveAttr::none();
+        assert!(!attr.mode);
+        assert!(!attr.ownership);
+        assert!(!attr.timestamps);
+        assert!(!attr.links);
+        assert!(!attr.context);
+        assert!(!attr.xattr);
+    }
 
-//         tokio::fs::write(&source, b"test").await.unwrap();
-//         tokio::fs::write(&dest, b"test").await.unwrap();
+    #[test]
+    fn test_preserve_attr_from_string_with_spaces() {
+        let attr = PreserveAttr::from_string("mode , timestamps , xattr").unwrap();
+        assert!(attr.mode);
+        assert!(attr.timestamps);
+        assert!(attr.xattr);
+        assert!(!attr.ownership);
+    }
 
-//         let src_metadata = tokio::fs::metadata(&source).await.unwrap();
-//         preserve_timestamps(&dest, &src_metadata).await.unwrap();
+    #[test]
+    fn test_preserve_attr_from_string_invalid() {
+        let result = PreserveAttr::from_string("mode,invalid_attr");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Unknown attribute"));
+    }
 
-//         let src_mtime = src_metadata.modified().unwrap();
-//         let dest_mtime = tokio::fs::metadata(&dest)
-//             .await
-//             .unwrap()
-//             .modified()
-//             .unwrap();
+    #[test]
+    fn test_preserve_timestamps() {
+        let temp_dir = TempDir::new().unwrap();
+        let source = temp_dir.path().join("source.txt");
+        let dest = temp_dir.path().join("dest.txt");
 
-//         // Allow for small differences due to precision
-//         let diff = if src_mtime > dest_mtime {
-//             src_mtime.duration_since(dest_mtime).unwrap()
-//         } else {
-//             dest_mtime.duration_since(src_mtime).unwrap()
-//         };
+        fs::write(&source, b"test").unwrap();
+        thread::sleep(Duration::from_millis(100));
+        fs::write(&dest, b"test").unwrap();
 
-//         assert!(diff.as_secs() < 1);
-//     }
+        let src_metadata = fs::metadata(&source).unwrap();
+        preserve_timestamps(&dest, &src_metadata).unwrap();
 
-//     #[cfg(unix)]
-//     #[tokio::test]
-//     async fn test_preserve_mode() {
-//         use std::os::unix::fs::PermissionsExt;
+        let src_mtime = src_metadata.modified().unwrap();
+        let dest_mtime = fs::metadata(&dest).unwrap().modified().unwrap();
 
-//         let temp_dir = TempDir::new().unwrap();
-//         let source = temp_dir.path().join("source.txt");
-//         let dest = temp_dir.path().join("dest.txt");
+        // Allow for small differences due to precision
+        let diff = if src_mtime > dest_mtime {
+            src_mtime.duration_since(dest_mtime).unwrap()
+        } else {
+            dest_mtime.duration_since(src_mtime).unwrap()
+        };
 
-//         tokio::fs::write(&source, b"test").await.unwrap();
-//         tokio::fs::write(&dest, b"test").await.unwrap();
+        assert!(diff.as_secs() < 1);
+    }
 
-//         // Set specific permissions on source
-//         let perms = std::fs::Permissions::from_mode(0o644);
-//         tokio::fs::set_permissions(&source, perms).await.unwrap();
+    #[cfg(unix)]
+    #[test]
+    fn test_preserve_mode() {
+        use std::os::unix::fs::PermissionsExt;
 
-//         let src_metadata = tokio::fs::metadata(&source).await.unwrap();
-//         preserve_mode(&dest, &src_metadata).await.unwrap();
+        let temp_dir = TempDir::new().unwrap();
+        let source = temp_dir.path().join("source.txt");
+        let dest = temp_dir.path().join("dest.txt");
 
-//         let dest_mode = tokio::fs::metadata(&dest)
-//             .await
-//             .unwrap()
-//             .permissions()
-//             .mode()
-//             & 0o777;
+        fs::write(&source, b"test").unwrap();
+        fs::write(&dest, b"test").unwrap();
 
-//         assert_eq!(dest_mode, 0o644);
-//     }
-// }
+        // Set specific permissions on source
+        let perms = std::fs::Permissions::from_mode(0o644);
+        fs::set_permissions(&source, perms).unwrap();
+
+        let src_metadata = fs::metadata(&source).unwrap();
+        preserve_mode(&dest, &src_metadata).unwrap();
+
+        let dest_mode = fs::metadata(&dest).unwrap().permissions().mode() & 0o777;
+
+        assert_eq!(dest_mode, 0o644);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_preserve_mode_executable() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp_dir = TempDir::new().unwrap();
+        let source = temp_dir.path().join("source.sh");
+        let dest = temp_dir.path().join("dest.sh");
+
+        fs::write(&source, b"#!/bin/bash\necho test").unwrap();
+        fs::write(&dest, b"#!/bin/bash\necho test").unwrap();
+
+        // Set executable permissions on source
+        let perms = std::fs::Permissions::from_mode(0o755);
+        fs::set_permissions(&source, perms).unwrap();
+
+        let src_metadata = fs::metadata(&source).unwrap();
+        preserve_mode(&dest, &src_metadata).unwrap();
+
+        let dest_mode = fs::metadata(&dest).unwrap().permissions().mode() & 0o777;
+
+        assert_eq!(dest_mode, 0o755);
+    }
+
+    #[test]
+    fn test_apply_preserve_attrs_timestamps_only() {
+        let temp_dir = TempDir::new().unwrap();
+        let source = temp_dir.path().join("source.txt");
+        let dest = temp_dir.path().join("dest.txt");
+
+        fs::write(&source, b"test").unwrap();
+        thread::sleep(Duration::from_millis(100));
+        fs::write(&dest, b"test").unwrap();
+
+        let mut attrs = PreserveAttr::none();
+        attrs.timestamps = true;
+
+        apply_preserve_attrs(&source, &dest, attrs).unwrap();
+
+        let src_mtime = fs::metadata(&source).unwrap().modified().unwrap();
+        let dest_mtime = fs::metadata(&dest).unwrap().modified().unwrap();
+
+        let diff = if src_mtime > dest_mtime {
+            src_mtime.duration_since(dest_mtime).unwrap()
+        } else {
+            dest_mtime.duration_since(src_mtime).unwrap()
+        };
+
+        assert!(diff.as_secs() < 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_apply_preserve_attrs_all() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp_dir = TempDir::new().unwrap();
+        let source = temp_dir.path().join("source.txt");
+        let dest = temp_dir.path().join("dest.txt");
+
+        fs::write(&source, b"test").unwrap();
+        fs::write(&dest, b"test").unwrap();
+
+        let perms = std::fs::Permissions::from_mode(0o600);
+        fs::set_permissions(&source, perms).unwrap();
+
+        let attrs = PreserveAttr::all();
+        apply_preserve_attrs(&source, &dest, attrs).unwrap();
+
+        let dest_mode = fs::metadata(&dest).unwrap().permissions().mode() & 0o777;
+        assert_eq!(dest_mode, 0o600);
+    }
+}

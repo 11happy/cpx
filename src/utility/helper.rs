@@ -134,223 +134,251 @@ pub fn truncate_filename(filename: &str, max_len: usize) -> String {
     }
 }
 
-// #[cfg(test)]
-// mod tests {
-//     use super::*;
-//     use std::fs;
-//     use std::path::PathBuf;
-//     use tempfile::TempDir;
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::path::PathBuf;
+    use tempfile::TempDir;
 
-//     #[test]
-//     fn test_with_parents_relative_path() {
-//         let dest = Path::new("/dest");
-//         let source = Path::new("a/b/file.txt");
+    #[test]
+    fn test_with_parents_relative_path() {
+        let dest = Path::new("/dest");
+        let source = Path::new("a/b/file.txt");
 
-//         let result = with_parents(dest, source);
-//         assert_eq!(result, PathBuf::from("/dest/a/b/file.txt"));
-//     }
+        let result = with_parents(dest, source);
+        assert_eq!(result, PathBuf::from("/dest/a/b/file.txt"));
+    }
 
-//     #[test]
-//     fn test_with_parents_absolute_path_unix() {
-//         #[cfg(unix)]
-//         {
-//             let dest = Path::new("/dest");
-//             let source = Path::new("/home/user/file.txt");
+    #[test]
+    fn test_with_parents_absolute_path_unix() {
+        #[cfg(unix)]
+        {
+            let dest = Path::new("/dest");
+            let source = Path::new("/home/user/file.txt");
 
-//             let result = with_parents(dest, source);
-//             assert_eq!(result, PathBuf::from("/dest/home/user/file.txt"));
-//         }
-//     }
+            let result = with_parents(dest, source);
+            assert_eq!(result, PathBuf::from("/dest/home/user/file.txt"));
+        }
+    }
 
-//     #[test]
-//     fn test_with_parents_single_file() {
-//         let dest = Path::new("/dest");
-//         let source = Path::new("file.txt");
+    #[test]
+    fn test_with_parents_single_file() {
+        let dest = Path::new("/dest");
+        let source = Path::new("file.txt");
 
-//         let result = with_parents(dest, source);
-//         assert_eq!(result, PathBuf::from("/dest/file.txt"));
-//     }
+        let result = with_parents(dest, source);
+        assert_eq!(result, PathBuf::from("/dest/file.txt"));
+    }
 
-//     #[test]
-//     fn test_with_parents_nested_path() {
-//         let dest = Path::new("/backup");
-//         let source = Path::new("projects/rust/cpx/src/main.rs");
+    #[test]
+    fn test_with_parents_nested_path() {
+        let dest = Path::new("/backup");
+        let source = Path::new("projects/rust/cpx/src/main.rs");
 
-//         let result = with_parents(dest, source);
-//         assert_eq!(
-//             result,
-//             PathBuf::from("/backup/projects/rust/cpx/src/main.rs")
-//         );
-//     }
+        let result = with_parents(dest, source);
+        assert_eq!(
+            result,
+            PathBuf::from("/backup/projects/rust/cpx/src/main.rs")
+        );
+    }
 
-//     #[test]
-//     fn test_with_parents_dest_with_trailing_slash() {
-//         let dest = Path::new("/dest/");
-//         let source = Path::new("a/b/file.txt");
+    #[test]
+    fn test_with_parents_dest_with_trailing_slash() {
+        let dest = Path::new("/dest/");
+        let source = Path::new("a/b/file.txt");
 
-//         let result = with_parents(dest, source);
-//         assert_eq!(result, PathBuf::from("/dest/a/b/file.txt"));
-//     }
+        let result = with_parents(dest, source);
+        assert_eq!(result, PathBuf::from("/dest/a/b/file.txt"));
+    }
 
-//     #[cfg(unix)]
-//     #[test]
-//     fn test_with_parents_root_in_source() {
-//         let dest = Path::new("/backup");
-//         let source = Path::new("/etc/config/app.conf");
+    #[cfg(unix)]
+    #[test]
+    fn test_with_parents_root_in_source() {
+        let dest = Path::new("/backup");
+        let source = Path::new("/etc/config/app.conf");
 
-//         let result = with_parents(dest, source);
-//         assert_eq!(result, PathBuf::from("/backup/etc/config/app.conf"));
-//     }
+        let result = with_parents(dest, source);
+        assert_eq!(result, PathBuf::from("/backup/etc/config/app.conf"));
+    }
 
-//     #[test]
-//     fn test_with_parents_current_dir() {
-//         let dest = Path::new("/dest");
-//         let source = Path::new("./file.txt");
+    #[test]
+    fn test_with_parents_current_dir() {
+        let dest = Path::new("/dest");
+        let source = Path::new("./file.txt");
 
-//         let result = with_parents(dest, source);
-//         assert!(result.to_string_lossy().ends_with("file.txt"));
-//     }
+        let result = with_parents(dest, source);
+        assert!(result.to_string_lossy().ends_with("file.txt"));
+    }
 
-//     #[test]
-//     fn test_with_parents_empty_dest() {
-//         let dest = Path::new("");
-//         let source = Path::new("a/b/file.txt");
+    #[test]
+    fn test_with_parents_empty_dest() {
+        let dest = Path::new("");
+        let source = Path::new("a/b/file.txt");
 
-//         let result = with_parents(dest, source);
-//         assert_eq!(result, PathBuf::from("a/b/file.txt"));
-//     }
+        let result = with_parents(dest, source);
+        assert_eq!(result, PathBuf::from("a/b/file.txt"));
+    }
 
-//     #[tokio::test]
-//     #[cfg(unix)]
-//     async fn test_create_symlink_absolute() {
-//         let temp_dir = TempDir::new().unwrap();
-//         let source = temp_dir.path().join("source.txt");
-//         let dest = temp_dir.path().join("link.txt");
+    #[test]
+    fn test_truncate_filename_short() {
+        let filename = "short.txt";
+        let result = truncate_filename(filename, 20);
+        assert_eq!(result, "short.txt");
+    }
 
-//         fs::write(&source, b"test content").unwrap();
+    #[test]
+    fn test_truncate_filename_exact() {
+        let filename = "exactly_ten";
+        let result = truncate_filename(filename, 11);
+        assert_eq!(result, "exactly_ten");
+    }
 
-//         let task = SymlinkTask {
-//             source: source.clone(),
-//             destination: dest.clone(),
-//             kind: SymlinkKind::AbsoluteToSource,
-//         };
+    #[test]
+    fn test_truncate_filename_long() {
+        let filename = "this_is_a_very_long_filename.txt";
+        let result = truncate_filename(filename, 15);
+        assert_eq!(result, "this_is_a_ve...");
+    }
 
-//         create_symlink(&task).await.unwrap();
+    #[test]
+    fn test_truncate_filename_zero_max() {
+        let filename = "test.txt";
+        let result = truncate_filename(filename, 0);
+        assert_eq!(result, "...");
+    }
 
-//         assert!(dest.exists());
-//         assert!(dest.symlink_metadata().unwrap().is_symlink());
+    #[test]
+    #[cfg(unix)]
+    fn test_create_symlink_absolute() {
+        let temp_dir = TempDir::new().unwrap();
+        let source = temp_dir.path().join("source.txt");
+        let dest = temp_dir.path().join("link.txt");
 
-//         let link_target = fs::read_link(&dest).unwrap();
-//         assert!(link_target.is_absolute());
-//     }
+        fs::write(&source, b"test content").unwrap();
 
-//     #[tokio::test]
-//     #[cfg(unix)]
-//     async fn test_create_symlink_relative() {
-//         let temp_dir = TempDir::new().unwrap();
-//         let source = temp_dir.path().join("source.txt");
-//         let dest_dir = temp_dir.path().join("links");
-//         fs::create_dir(&dest_dir).unwrap();
-//         let dest = dest_dir.join("link.txt");
+        let task = SymlinkTask {
+            source: source.clone(),
+            destination: dest.clone(),
+            kind: SymlinkKind::AbsoluteToSource,
+        };
 
-//         fs::write(&source, b"test content").unwrap();
+        create_symlink(&task).unwrap();
 
-//         let task = SymlinkTask {
-//             source: source.clone(),
-//             destination: dest.clone(),
-//             kind: SymlinkKind::RelativeToSource,
-//         };
+        assert!(dest.exists());
+        assert!(dest.symlink_metadata().unwrap().is_symlink());
 
-//         create_symlink(&task).await.unwrap();
+        let link_target = fs::read_link(&dest).unwrap();
+        assert!(link_target.is_absolute());
+    }
 
-//         assert!(dest.exists());
-//         assert!(dest.symlink_metadata().unwrap().is_symlink());
+    #[test]
+    #[cfg(unix)]
+    fn test_create_symlink_relative() {
+        let temp_dir = TempDir::new().unwrap();
+        let source = temp_dir.path().join("source.txt");
+        let dest_dir = temp_dir.path().join("links");
+        fs::create_dir(&dest_dir).unwrap();
+        let dest = dest_dir.join("link.txt");
 
-//         let link_target = fs::read_link(&dest).unwrap();
-//         assert!(!link_target.is_absolute());
-//         assert_eq!(link_target, PathBuf::from("../source.txt"));
-//     }
+        fs::write(&source, b"test content").unwrap();
 
-//     #[tokio::test]
-//     #[cfg(unix)]
-//     async fn test_create_symlink_to_directory() {
-//         let temp_dir = TempDir::new().unwrap();
-//         let source_dir = temp_dir.path().join("source_dir");
-//         let dest_link = temp_dir.path().join("link_dir");
+        let task = SymlinkTask {
+            source: source.clone(),
+            destination: dest.clone(),
+            kind: SymlinkKind::RelativeToSource,
+        };
 
-//         fs::create_dir(&source_dir).unwrap();
-//         fs::write(source_dir.join("file.txt"), b"content").unwrap();
+        create_symlink(&task).unwrap();
 
-//         let task = SymlinkTask {
-//             source: source_dir.clone(),
-//             destination: dest_link.clone(),
-//             kind: SymlinkKind::AbsoluteToSource,
-//         };
+        assert!(dest.exists());
+        assert!(dest.symlink_metadata().unwrap().is_symlink());
 
-//         create_symlink(&task).await.unwrap();
+        let link_target = fs::read_link(&dest).unwrap();
+        assert!(!link_target.is_absolute());
+        assert_eq!(link_target, PathBuf::from("../source.txt"));
+    }
 
-//         assert!(dest_link.exists());
-//         assert!(dest_link.symlink_metadata().unwrap().is_symlink());
-//     }
+    #[test]
+    #[cfg(unix)]
+    fn test_create_symlink_to_directory() {
+        let temp_dir = TempDir::new().unwrap();
+        let source_dir = temp_dir.path().join("source_dir");
+        let dest_link = temp_dir.path().join("link_dir");
 
-//     #[tokio::test]
-//     #[cfg(unix)]
-//     async fn test_create_symlink_nested_path() {
-//         let temp_dir = TempDir::new().unwrap();
-//         let source = temp_dir.path().join("a/b/c/source.txt");
-//         fs::create_dir_all(source.parent().unwrap()).unwrap();
-//         fs::write(&source, b"test").unwrap();
+        fs::create_dir(&source_dir).unwrap();
+        fs::write(source_dir.join("file.txt"), b"content").unwrap();
 
-//         let dest_dir = temp_dir.path().join("x/y/z");
-//         fs::create_dir_all(&dest_dir).unwrap();
-//         let dest = dest_dir.join("link.txt");
+        let task = SymlinkTask {
+            source: source_dir.clone(),
+            destination: dest_link.clone(),
+            kind: SymlinkKind::AbsoluteToSource,
+        };
 
-//         let task = SymlinkTask {
-//             source: source.clone(),
-//             destination: dest.clone(),
-//             kind: SymlinkKind::RelativeToSource,
-//         };
+        create_symlink(&task).unwrap();
 
-//         create_symlink(&task).await.unwrap();
+        assert!(dest_link.exists());
+        assert!(dest_link.symlink_metadata().unwrap().is_symlink());
+    }
 
-//         assert!(dest.exists());
-//         let link_target = fs::read_link(&dest).unwrap();
-//         assert!(!link_target.is_absolute());
-//         assert_eq!(link_target, PathBuf::from("../../../a/b/c/source.txt"));
-//     }
+    #[test]
+    #[cfg(unix)]
+    fn test_create_symlink_nested_path() {
+        let temp_dir = TempDir::new().unwrap();
+        let source = temp_dir.path().join("a/b/c/source.txt");
+        fs::create_dir_all(source.parent().unwrap()).unwrap();
+        fs::write(&source, b"test").unwrap();
 
-//     #[tokio::test]
-//     #[cfg(unix)]
-//     async fn test_create_symlink_nonexistent_source_absolute() {
-//         let temp_dir = TempDir::new().unwrap();
-//         let source = temp_dir.path().join("nonexistent.txt");
-//         let dest = temp_dir.path().join("link.txt");
+        let dest_dir = temp_dir.path().join("x/y/z");
+        fs::create_dir_all(&dest_dir).unwrap();
+        let dest = dest_dir.join("link.txt");
 
-//         let task = SymlinkTask {
-//             source: source.clone(),
-//             destination: dest.clone(),
-//             kind: SymlinkKind::AbsoluteToSource,
-//         };
+        let task = SymlinkTask {
+            source: source.clone(),
+            destination: dest.clone(),
+            kind: SymlinkKind::RelativeToSource,
+        };
 
-//         let result = create_symlink(&task).await;
-//         assert!(result.is_err());
-//     }
+        create_symlink(&task).unwrap();
 
-//     #[tokio::test]
-//     #[cfg(unix)]
-//     async fn test_create_symlink_nonexistent_source_relative() {
-//         let temp_dir = TempDir::new().unwrap();
-//         let source = temp_dir.path().join("nonexistent.txt");
-//         let dest = temp_dir.path().join("link.txt");
+        assert!(dest.exists());
+        let link_target = fs::read_link(&dest).unwrap();
+        assert!(!link_target.is_absolute());
+        assert_eq!(link_target, PathBuf::from("../../../a/b/c/source.txt"));
+    }
 
-//         let task = SymlinkTask {
-//             source: source.clone(),
-//             destination: dest.clone(),
-//             kind: SymlinkKind::RelativeToSource,
-//         };
+    #[test]
+    #[cfg(unix)]
+    fn test_create_symlink_nonexistent_source_absolute() {
+        let temp_dir = TempDir::new().unwrap();
+        let source = temp_dir.path().join("nonexistent.txt");
+        let dest = temp_dir.path().join("link.txt");
 
-//         create_symlink(&task).await.unwrap();
-//         assert!(dest.symlink_metadata().unwrap().is_symlink());
-//         assert!(dest.metadata().is_err());
-//     }
-// }
+        let task = SymlinkTask {
+            source: source.clone(),
+            destination: dest.clone(),
+            kind: SymlinkKind::AbsoluteToSource,
+        };
+
+        let result = create_symlink(&task);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_create_symlink_nonexistent_source_relative() {
+        let temp_dir = TempDir::new().unwrap();
+        let source = temp_dir.path().join("nonexistent.txt");
+        let dest = temp_dir.path().join("link.txt");
+
+        let task = SymlinkTask {
+            source: source.clone(),
+            destination: dest.clone(),
+            kind: SymlinkKind::RelativeToSource,
+        };
+
+        create_symlink(&task).unwrap();
+        assert!(dest.symlink_metadata().unwrap().is_symlink());
+        assert!(dest.metadata().is_err());
+    }
+}

@@ -147,13 +147,11 @@ fn execute_copy(plan: CopyPlan, options: &CopyOptions) -> io::Result<()> {
             )?;
         }
     } else {
-        // Configure rayon thread pool with user's concurrency setting
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(options.concurrency)
             .build()
             .map_err(|e| io::Error::other(format!("Failed to create thread pool: {}", e)))?;
 
-        // Parallel copy with rayon
         let results: Vec<_> = pool.install(|| {
             plan.files
                 .par_iter()
@@ -171,7 +169,6 @@ fn execute_copy(plan: CopyPlan, options: &CopyOptions) -> io::Result<()> {
                 .collect()
         });
 
-        // Check for errors
         let errors: Vec<_> = results
             .into_iter()
             .enumerate()
@@ -264,23 +261,18 @@ fn copy_core(
                 Err(e) if reflink_mode == ReflinkMode::Always => {
                     return Err(io::Error::new(io::ErrorKind::Unsupported, e));
                 }
-                Err(_) => {} // Auto fallback
+                Err(_) => {}
             }
         }
     }
 
     #[cfg(target_os = "linux")]
-    match fast_copy(source, destination, file_size, overall_pb, options) {
-        Ok(true) => {
-            update_progress(overall_pb, completed_files, total_files, &options);
-            if options.preserve != PreserveAttr::none() {
-                preserve::apply_preserve_attrs(source, destination, options.preserve)?;
-            }
-            return Ok(());
+    if let Ok(true) = fast_copy(source, destination, file_size, overall_pb, options) {
+        update_progress(overall_pb, completed_files, total_files, &options);
+        if options.preserve != PreserveAttr::none() {
+            preserve::apply_preserve_attrs(source, destination, options.preserve)?;
         }
-        Ok(false) | Err(_) => {
-            // Fallback to regular copy
-        }
+        return Ok(());
     }
 
     let mut src_file = std::fs::File::open(source)?;
