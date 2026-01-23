@@ -1,4 +1,5 @@
 use globset::{Glob, GlobSet, GlobSetBuilder};
+use std::path::Component;
 use std::{
     borrow::Cow,
     collections::HashSet,
@@ -35,6 +36,31 @@ impl ExcludePattern {
             ExcludePattern::BaseName(trimmed.to_string())
         }
     }
+}
+
+pub fn parse_exclude_pattern_list(input: &str) -> Result<Vec<ExcludePattern>, String> {
+    let mut patterns = Vec::new();
+
+    for raw in input.split(',') {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        let path = Path::new(trimmed);
+        for component in path.components() {
+            if matches!(component, Component::ParentDir) {
+                return Err(format!(
+                    "Invalid exclude pattern '{}': parent directory references (..) are not allowed",
+                    trimmed
+                ));
+            }
+        }
+
+        patterns.push(ExcludePattern::from_string(trimmed));
+    }
+
+    Ok(patterns)
 }
 
 pub fn build_exclude_rules(patterns: Vec<ExcludePattern>) -> Result<Option<ExcludeRules>, String> {

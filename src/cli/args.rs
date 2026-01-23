@@ -4,12 +4,14 @@ use crate::config::schema::Config;
 use crate::utility::helper::parse_progress_bar;
 use crate::utility::progress_bar::ProgressOptions;
 use crate::utility::{
-    exclude::{ExcludePattern, ExcludeRules, build_exclude_rules},
+    exclude::{ExcludePattern, ExcludeRules, build_exclude_rules, parse_exclude_pattern_list},
     helper::{parse_backup_mode, parse_follow_symlink, parse_reflink_mode, parse_symlink_mode},
     preserve::PreserveAttr,
 };
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum SymlinkMode {
@@ -214,6 +216,7 @@ pub struct CopyOptions {
     pub backup: Option<BackupMode>,
     pub reflink: Option<ReflinkMode>,
     pub exclude_rules: Option<ExcludeRules>,
+    pub abort: Arc<AtomicBool>,
 }
 
 impl CopyOptions {
@@ -235,6 +238,7 @@ impl CopyOptions {
             backup: None,
             reflink: None,
             exclude_rules: None,
+            abort: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -257,6 +261,7 @@ impl CopyOptions {
             backup: parse_backup_mode(&config.backup.mode),
             reflink: parse_reflink_mode(&config.reflink.mode),
             exclude_rules: None,
+            abort: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -285,6 +290,7 @@ impl From<&CopyArgs> for CopyOptions {
             backup: cli.backup,
             reflink: cli.reflink,
             exclude_rules: None,
+            abort: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -430,19 +436,7 @@ fn build_all_exclude_patterns(
 
     if let Some(cfg) = config {
         for pattern_str in &cfg.exclude.patterns {
-            for pattern in pattern_str.split(',') {
-                let trimmed = pattern.trim();
-                if trimmed.is_empty() {
-                    continue;
-                }
-                if trimmed.contains("..") {
-                    return Err(format!(
-                        "Invalid exclude pattern '{}': parent directory references (..) are not allowed",
-                        trimmed
-                    ));
-                }
-                all_patterns.push(ExcludePattern::from_string(trimmed));
-            }
+            all_patterns.extend(parse_exclude_pattern_list(pattern_str)?);
         }
     }
 
@@ -503,21 +497,11 @@ impl CopyArgs {
 
     pub fn parse_exclude_patterns(&self) -> Result<Vec<ExcludePattern>, String> {
         let mut patterns = Vec::new();
+
         for pattern_str in &self.exclude {
-            for pattern in pattern_str.split(',') {
-                let trimmed = pattern.trim();
-                if trimmed.is_empty() {
-                    continue;
-                }
-                if trimmed.contains("..") {
-                    return Err(format!(
-                        "Invalid exclude pattern '{}': parent directory references (..) are not allowed",
-                        trimmed
-                    ));
-                }
-                patterns.push(ExcludePattern::from_string(trimmed));
-            }
+            patterns.extend(parse_exclude_pattern_list(pattern_str)?);
         }
+
         Ok(patterns)
     }
 }

@@ -2,6 +2,7 @@ use indicatif::ProgressBar;
 use nix::fcntl::copy_file_range;
 use std::io;
 use std::path::Path;
+use std::sync::atomic::Ordering;
 
 use crate::cli::args::CopyOptions;
 
@@ -33,6 +34,24 @@ pub fn fast_copy(
     let chunk_size = std::cmp::max(MIN_CHUNK, (file_size / TARGET_UPDATES) as usize);
     let mut total_copied = 0u64;
     loop {
+        // NEW: Check for interrupt
+        if options.abort.load(Ordering::Relaxed) {
+            drop(dest_file); // Close file
+            if let Err(e) = std::fs::remove_file(destination) {
+                eprintln!(
+                    "Could not remove incomplete file {}: {}",
+                    destination.display(),
+                    e
+                );
+            } else {
+                eprintln!("Cleaned up incomplete file: {}", destination.display());
+            }
+            return Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "Operation aborted by user",
+            ));
+        }
+
         let to_copy = std::cmp::min(chunk_size, (file_size - total_copied) as usize);
         if to_copy == 0 {
             break;

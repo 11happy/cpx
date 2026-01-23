@@ -171,11 +171,34 @@ fn execute_copy(plan: CopyPlan, options: &CopyOptions) -> io::Result<()> {
                 .collect()
         });
 
-        let errors: Vec<_> = results
-            .into_iter()
-            .enumerate()
-            .filter_map(|(i, r)| r.err().map(|e| format!("File {}: {}", i, e)))
-            .collect();
+        let mut interrupted = false;
+        let mut errors: Vec<String> = Vec::new();
+
+        for (i, result) in results.into_iter().enumerate() {
+            if let Err(e) = result {
+                if e.kind() == io::ErrorKind::Interrupted {
+                    interrupted = true;
+                } else {
+                    errors.push(format!("File {}: {}", i, e));
+                }
+            }
+        }
+
+        if interrupted {
+            if let Some(pb) = overall_pb {
+                pb.abandon_with_message("Interrupted — partial files cleaned");
+            }
+
+            let completed = completed_files.load(Ordering::Relaxed);
+            eprintln!("\nSummary:");
+            eprintln!("Completed:  {} files", completed);
+            eprintln!("Remaining:  {} files", plan.total_files - completed);
+
+            return Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "Operation interrupted by user",
+            ));
+        }
 
         if !errors.is_empty() {
             if let Some(pb) = overall_pb {
@@ -271,12 +294,20 @@ fn copy_core(
     }
 
     #[cfg(target_os = "linux")]
-    if let Ok(true) = fast_copy(source, destination, file_size, overall_pb, options) {
-        update_progress(overall_pb, completed_files, total_files, options);
-        if options.preserve != PreserveAttr::none() {
-            preserve::apply_preserve_attrs(source, destination, options.preserve)?;
+    {
+        if options.abort.load(Ordering::Relaxed) {
+            return Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "Operation aborted by user",
+            ));
         }
-        return Ok(());
+        if let Ok(true) = fast_copy(source, destination, file_size, overall_pb, options) {
+            update_progress(overall_pb, completed_files, total_files, options);
+            if options.preserve != PreserveAttr::none() {
+                preserve::apply_preserve_attrs(source, destination, options.preserve)?;
+            }
+            return Ok(());
+        }
     }
 
     let mut src_file = std::fs::File::open(source)?;
@@ -314,6 +345,25 @@ fn copy_core(
     let mut accumulated_bytes = 0u64;
 
     loop {
+        if options.abort.load(Ordering::Relaxed) {
+            dest_file.flush()?;
+            drop(dest_file);
+            if let Err(e) = std::fs::remove_file(destination) {
+                eprintln!(
+                    "Could not remove incomplete file {}: {}",
+                    destination.display(),
+                    e
+                );
+            } else {
+                eprintln!("Cleaned up incomplete file: {}", destination.display());
+            }
+
+            return Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "Operation aborted by user",
+            ));
+        }
+
         let bytes_read = src_file.read(&mut buffer)?;
         if bytes_read == 0 {
             break;
@@ -365,6 +415,7 @@ mod tests {
     use super::*;
     use crate::utility::progress_bar::ProgressOptions;
     use std::fs;
+    use std::sync::atomic::AtomicBool;
     use tempfile::TempDir;
     fn default_copy_options() -> CopyOptions {
         CopyOptions {
@@ -384,6 +435,7 @@ mod tests {
             concurrency: 1,
             exclude_rules: None,
             progress_bar: ProgressOptions::default(),
+            abort: Arc::new(AtomicBool::new(false)),
         }
     }
 
