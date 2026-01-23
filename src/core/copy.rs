@@ -127,7 +127,7 @@ fn execute_copy(plan: CopyPlan, options: &CopyOptions) -> io::Result<()> {
 
     let overall_pb = if plan.total_files >= 1 && !options.interactive && !options.attributes_only {
         let pb = ProgressBar::new(plan.total_size);
-        options.style.apply(&pb, plan.total_files);
+        options.progress_bar.apply(&pb, plan.total_files);
         Some(Arc::new(pb))
     } else {
         None
@@ -189,7 +189,9 @@ fn execute_copy(plan: CopyPlan, options: &CopyOptions) -> io::Result<()> {
     }
 
     if let Some(pb) = overall_pb {
-        if matches!(options.style, ProgressBarStyle::Detailed) && !options.attributes_only {
+        if matches!(options.progress_bar.style, ProgressBarStyle::Detailed)
+            && !options.attributes_only
+        {
             pb.finish_with_message(format!("Copied {} files successfully", plan.total_files));
         } else {
             pb.finish_with_message("Done".to_string());
@@ -302,7 +304,7 @@ fn copy_core(
     let mut dest_file = std::io::BufWriter::with_capacity(buffer_size, dest_file);
     let mut buffer = vec![0u8; buffer_size];
 
-    const MAX_UPDATES: u64 = 16;
+    const MAX_UPDATES: u64 = 128;
     let update_threshold = if file_size > MAX_UPDATES * buffer_size as u64 {
         file_size / MAX_UPDATES
     } else {
@@ -352,7 +354,7 @@ fn update_progress(
 ) {
     let completed = completed_files.fetch_add(1, Ordering::Relaxed) + 1;
     if let Some(pb) = overall_pb
-        && matches!(options.style, ProgressBarStyle::Detailed)
+        && matches!(options.progress_bar.style, ProgressBarStyle::Detailed)
     {
         pb.set_message(format!("Copying: {}/{} files", completed, total_files));
     }
@@ -361,9 +363,9 @@ fn update_progress(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::utility::progress_bar::ProgressOptions;
     use std::fs;
     use tempfile::TempDir;
-
     fn default_copy_options() -> CopyOptions {
         CopyOptions {
             recursive: false,
@@ -380,8 +382,8 @@ mod tests {
             reflink: None,
             parents: false,
             concurrency: 1,
-            style: ProgressBarStyle::Default,
             exclude_rules: None,
+            progress_bar: ProgressOptions::default(),
         }
     }
 

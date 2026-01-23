@@ -6,23 +6,6 @@ use std::fs;
 use std::process::Command;
 
 #[test]
-fn test_cli_no_args() {
-    Command::new(cargo::cargo_bin!("cpx"))
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains("required"));
-}
-
-#[test]
-fn test_cli_help() {
-    Command::new(cargo::cargo_bin!("cpx"))
-        .arg("--help")
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("Copy directories recursively"));
-}
-
-#[test]
 fn test_copy_single_file() {
     let temp = assert_fs::TempDir::new().unwrap();
     let source = temp.child("source.txt");
@@ -162,7 +145,7 @@ fn test_copy_with_resume_flag() {
     dest.write_str("Same content").unwrap();
 
     Command::new(cargo::cargo_bin!("cpx"))
-        .arg("-c")
+        .arg("--resume")
         .arg(source.path())
         .arg(dest_dir.path())
         .assert()

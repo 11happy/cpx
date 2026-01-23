@@ -1,7 +1,8 @@
-use crate::cli::args::CopyOptions;
-use crate::utility::preprocess::HardlinkTask;
-
 use super::preprocess::{SymlinkKind, SymlinkTask};
+use super::progress_bar::{ProgressBarStyle, ProgressOptions};
+use crate::cli::args::{BackupMode, CopyOptions, FollowSymlink, ReflinkMode, SymlinkMode};
+use crate::config::schema::Config;
+use crate::utility::preprocess::HardlinkTask;
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -131,6 +132,61 @@ pub fn truncate_filename(filename: &str, max_len: usize) -> String {
     } else {
         let truncate_at = max_len.saturating_sub(3);
         format!("{}...", &filename[..truncate_at])
+    }
+}
+
+pub fn parse_symlink_mode(s: &str) -> Option<SymlinkMode> {
+    match s {
+        "auto" => Some(SymlinkMode::Auto),
+        "absolute" => Some(SymlinkMode::Absolute),
+        "relative" => Some(SymlinkMode::Relative),
+        _ => None,
+    }
+}
+
+pub fn parse_follow_symlink(s: &str) -> FollowSymlink {
+    match s {
+        "never" => FollowSymlink::NoDereference,
+        "always" => FollowSymlink::Dereference,
+        "command-line" => FollowSymlink::CommandLineSymlink,
+        _ => FollowSymlink::NoDereference,
+    }
+}
+
+pub fn parse_progress_style(s: &str) -> ProgressBarStyle {
+    match s {
+        "detailed" => ProgressBarStyle::Detailed,
+        _ => ProgressBarStyle::Default,
+    }
+}
+
+pub fn parse_progress_bar(cfg: &Config) -> ProgressOptions {
+    ProgressOptions {
+        style: parse_progress_style(&cfg.progress.style),
+        filled: cfg.progress.bar.filled.clone(),
+        empty: cfg.progress.bar.empty.clone(),
+        head: cfg.progress.bar.head.clone(),
+        bar_color: cfg.progress.color.bar.clone(),
+        message_color: cfg.progress.color.message.clone(),
+    }
+}
+
+pub fn parse_backup_mode(s: &str) -> Option<BackupMode> {
+    match s {
+        "none" => Some(BackupMode::None),
+        "simple" => Some(BackupMode::Simple),
+        "numbered" => Some(BackupMode::Numbered),
+        "existing" => Some(BackupMode::Existing),
+        _ => None,
+    }
+}
+
+pub fn parse_reflink_mode(s: &str) -> Option<ReflinkMode> {
+    match s {
+        "auto" => Some(ReflinkMode::Auto),
+        "always" => Some(ReflinkMode::Always),
+        "never" => Some(ReflinkMode::Never),
+        _ => None,
     }
 }
 

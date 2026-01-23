@@ -1,10 +1,14 @@
+use crate::config::config_command::ConfigCommand;
+use crate::config::loader::{load_config, load_config_file};
+use crate::config::schema::Config;
+use crate::utility::helper::parse_progress_bar;
+use crate::utility::progress_bar::ProgressOptions;
 use crate::utility::{
     exclude::{ExcludePattern, ExcludeRules, build_exclude_rules},
+    helper::{parse_backup_mode, parse_follow_symlink, parse_reflink_mode, parse_symlink_mode},
     preserve::PreserveAttr,
-    progress_bar::ProgressBarStyle,
 };
-
-use clap::{Parser, ValueEnum};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -18,6 +22,8 @@ pub enum SymlinkMode {
 pub enum ReflinkMode {
     Always,
     Auto,
+    Clone,
+    Copy,
     Never,
 }
 
@@ -36,12 +42,37 @@ pub enum FollowSymlink {
     CommandLineSymlink,
 }
 
+#[derive(Debug, Subcommand)]
+pub enum Commands {
+    /// Default (Implicit)
+    Copy(CopyArgs),
+
+    /// Manage configuration
+    Config {
+        #[command(subcommand)]
+        command: ConfigCommand,
+    },
+}
+
 #[derive(Parser, Debug)]
+#[command(name = "cpx")]
 pub struct CLIArgs {
-    #[arg(required = true)]
+    #[command(subcommand)]
+    pub command: Commands,
+}
+
+#[derive(Args, Debug)]
+pub struct CopyArgs {
+    #[arg(long, value_name = "PATH", help = "Use custom config file")]
+    pub config: Option<PathBuf>,
+
+    #[arg(long, help = "Ignore all config files")]
+    pub no_config: bool,
+
+    #[arg(help = "Source file(s) or directory(ies)", required = true)]
     pub sources: Vec<PathBuf>,
 
-    #[arg(required = true)]
+    #[arg(help = "Destination file or directory", required = true)]
     pub destination: PathBuf,
 
     #[arg(
@@ -51,13 +82,6 @@ pub struct CLIArgs {
         help = "copy all SOURCE arguments into DIRECTORY"
     )]
     pub target_directory: Option<PathBuf>,
-
-    #[arg(
-        long,
-        default_value = "default",
-        help = "Progress bar style: default, detailed"
-    )]
-    pub style: ProgressBarStyle,
 
     #[arg(short, long, help = "Copy directories recursively")]
     pub recursive: bool,
@@ -69,12 +93,8 @@ pub struct CLIArgs {
     )]
     pub concurrency: usize,
 
-    #[arg(
-        short = 'c',
-        long = "continue",
-        help = "Continue copying by skipping files that are already complete"
-    )]
-    pub continue_copy: bool,
+    #[arg(long = "resume", help = "resume interrupted transfers")]
+    pub resume: bool,
 
     #[arg(
         short = 'f',
@@ -111,13 +131,13 @@ pub struct CLIArgs {
     pub remove_destination: bool,
 
     #[arg(
-            short = 's',
-            long = "symbolic-link",
-            value_name = "MODE",
-            default_missing_value = "auto",
-            num_args = 0..=1,
-            help = "make symbolic links instead of copying (auto, absolute, or relative)"
-        )]
+        short = 's',
+        long = "symbolic-link",
+        value_name = "MODE",
+        default_missing_value = "auto",
+        num_args = 0..=1,
+        help = "make symbolic links instead of copying (auto, absolute, or relative)"
+    )]
     pub symbolic_link: Option<SymlinkMode>,
 
     #[arg(
@@ -133,6 +153,7 @@ pub struct CLIArgs {
         help = "never follow symbolic links in SOURCE"
     )]
     pub no_dereference: bool,
+
     #[arg(
         short = 'L',
         long = "dereference",
@@ -189,7 +210,7 @@ pub struct CopyOptions {
     pub symbolic_link: Option<SymlinkMode>,
     pub hard_link: bool,
     pub follow_symlink: FollowSymlink,
-    pub style: ProgressBarStyle,
+    pub progress_bar: ProgressOptions,
     pub backup: Option<BackupMode>,
     pub reflink: Option<ReflinkMode>,
     pub exclude_rules: Option<ExcludeRules>,
@@ -210,20 +231,42 @@ impl CopyOptions {
             symbolic_link: None,
             hard_link: false,
             follow_symlink: FollowSymlink::NoDereference,
-            style: ProgressBarStyle::Default,
+            progress_bar: ProgressOptions::default(),
             backup: None,
             reflink: None,
             exclude_rules: None,
         }
     }
+
+    pub fn from_config(config: &Config) -> Self {
+        Self {
+            recursive: config.copy.recursive,
+            concurrency: config.copy.concurrency,
+            resume: config.copy.resume,
+            force: config.copy.force,
+            interactive: config.copy.interactive,
+            parents: config.copy.parents,
+            preserve: PreserveAttr::from_string(&config.preserve.mode)
+                .unwrap_or_else(|_| PreserveAttr::default()),
+            attributes_only: config.copy.attributes_only,
+            remove_destination: config.copy.remove_destination,
+            symbolic_link: parse_symlink_mode(&config.symlink.mode),
+            hard_link: false,
+            follow_symlink: parse_follow_symlink(&config.symlink.follow),
+            progress_bar: parse_progress_bar(config),
+            backup: parse_backup_mode(&config.backup.mode),
+            reflink: parse_reflink_mode(&config.reflink.mode),
+            exclude_rules: None,
+        }
+    }
 }
 
-impl From<&CLIArgs> for CopyOptions {
-    fn from(cli: &CLIArgs) -> Self {
+impl From<&CopyArgs> for CopyOptions {
+    fn from(cli: &CopyArgs) -> Self {
         Self {
             recursive: cli.recursive,
             concurrency: cli.concurrency,
-            resume: cli.continue_copy,
+            resume: cli.resume,
             force: cli.force,
             interactive: cli.interactive,
             parents: cli.parents,
@@ -238,7 +281,7 @@ impl From<&CLIArgs> for CopyOptions {
             symbolic_link: cli.symbolic_link,
             hard_link: cli.hard_link,
             follow_symlink: FollowSymlink::NoDereference,
-            style: cli.style,
+            progress_bar: ProgressOptions::default(),
             backup: cli.backup,
             reflink: cli.reflink,
             exclude_rules: None,
@@ -247,6 +290,203 @@ impl From<&CLIArgs> for CopyOptions {
 }
 
 impl CLIArgs {
+    /// Parse arguments with implicit copy command support
+    pub fn parse() -> Self {
+        let mut args: Vec<String> = std::env::args().collect();
+
+        if args.len() > 1 {
+            let first_arg = &args[1];
+            let is_subcommand = matches!(
+                first_arg.as_str(),
+                "config" | "copy" | "-h" | "--help" | "-V" | "--version"
+            );
+            if !is_subcommand {
+                args.insert(1, "copy".to_string());
+                return <Self as clap::Parser>::parse_from(args);
+            }
+        }
+        <Self as clap::Parser>::parse()
+    }
+
+    pub fn validate(self) -> Result<(Vec<PathBuf>, PathBuf, CopyOptions), String> {
+        // Handle config command
+        if let Commands::Config { command } = &self.command {
+            command
+                .execute()
+                .map_err(|e| format!("Failed to execute config command: {}", e))?;
+            std::process::exit(0);
+        }
+
+        // Get copy args from the Copy subcommand
+        let copy_args = match self.command {
+            Commands::Copy(args) => args,
+            _ => unreachable!(),
+        };
+
+        let config = load_config_if_needed(&copy_args)?;
+
+        // Start with config or defaults
+        let mut options = if let Some(ref cfg) = config {
+            CopyOptions::from_config(cfg)
+        } else {
+            CopyOptions::none()
+        };
+
+        // CLI args override config
+        apply_cli_overrides(&mut options, &copy_args)?;
+
+        // Build exclude rules
+        let all_patterns = build_all_exclude_patterns(&copy_args, config.as_ref())?;
+        options.exclude_rules = build_exclude_rules(all_patterns)?;
+
+        // Validate conflicts
+        validate_conflicts(&options)?;
+
+        // Handle attributes_only special case
+        if options.attributes_only {
+            options.preserve = PreserveAttr::all();
+        }
+
+        let (sources, destination) = if let Some(target) = copy_args.target_directory {
+            let mut sources = copy_args.sources;
+            sources.push(copy_args.destination);
+            (sources, target)
+        } else {
+            (copy_args.sources, copy_args.destination)
+        };
+
+        Ok((sources, destination, options))
+    }
+}
+
+fn load_config_if_needed(copy_args: &CopyArgs) -> Result<Option<Config>, String> {
+    if copy_args.no_config {
+        return Ok(None);
+    }
+
+    if let Some(custom_path) = &copy_args.config {
+        return Ok(Some(
+            load_config_file(custom_path).map_err(|e| format!("Failed to load config: {}", e))?,
+        ));
+    }
+
+    Ok(Some(load_config()))
+}
+
+fn apply_cli_overrides(options: &mut CopyOptions, copy_args: &CopyArgs) -> Result<(), String> {
+    // Boolean flags - when present, they override
+    if copy_args.recursive {
+        options.recursive = true;
+    }
+    if copy_args.force {
+        options.force = true;
+    }
+    if copy_args.interactive {
+        options.interactive = true;
+    }
+    if copy_args.resume {
+        options.resume = true;
+    }
+    if copy_args.parents {
+        options.parents = true;
+    }
+    if copy_args.attributes_only {
+        options.attributes_only = true;
+    }
+    if copy_args.remove_destination {
+        options.remove_destination = true;
+    }
+    if copy_args.hard_link {
+        options.hard_link = true;
+    }
+
+    // Optional fields - when Some, they override
+    if copy_args.symbolic_link.is_some() {
+        options.symbolic_link = copy_args.symbolic_link;
+    }
+    if copy_args.backup.is_some() {
+        options.backup = copy_args.backup;
+    }
+    if copy_args.reflink.is_some() {
+        options.reflink = copy_args.reflink;
+    }
+    if let Some(preserve_str) = &copy_args.preserve {
+        options.preserve =
+            PreserveAttr::from_string(preserve_str).expect("unable to parse preserve attribute");
+    }
+
+    options.concurrency = copy_args.concurrency;
+
+    options.follow_symlink = copy_args.follow_symlink_mode()?;
+
+    Ok(())
+}
+
+fn build_all_exclude_patterns(
+    copy_args: &CopyArgs,
+    config: Option<&Config>,
+) -> Result<Vec<ExcludePattern>, String> {
+    let mut all_patterns = Vec::new();
+
+    if let Some(cfg) = config {
+        for pattern_str in &cfg.exclude.patterns {
+            for pattern in pattern_str.split(',') {
+                let trimmed = pattern.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                if trimmed.contains("..") {
+                    return Err(format!(
+                        "Invalid exclude pattern '{}': parent directory references (..) are not allowed",
+                        trimmed
+                    ));
+                }
+                all_patterns.push(ExcludePattern::from_string(trimmed));
+            }
+        }
+    }
+
+    all_patterns.extend(copy_args.parse_exclude_patterns()?);
+    Ok(all_patterns)
+}
+
+fn validate_conflicts(options: &CopyOptions) -> Result<(), String> {
+    if options.reflink.is_some() {
+        if options.hard_link {
+            return Err("--reflink and --link cannot be used together".to_string());
+        }
+        if options.symbolic_link.is_some() {
+            return Err("--reflink and --symbolic-link cannot be used together".to_string());
+        }
+    }
+
+    if options.symbolic_link.is_some() {
+        if options.hard_link {
+            return Err("--symbolic-link and --link cannot be used together".to_string());
+        }
+        if options.resume {
+            return Err("--symbolic-link and --continue cannot be used together".to_string());
+        }
+        if options.attributes_only {
+            return Err(
+                "--symbolic-link and --attributes-only cannot be used together".to_string(),
+            );
+        }
+    }
+
+    if options.hard_link {
+        if options.resume {
+            return Err("--link and --continue cannot be used together".to_string());
+        }
+        if options.attributes_only {
+            return Err("--link and --attributes-only cannot be used together".to_string());
+        }
+    }
+
+    Ok(())
+}
+
+impl CopyArgs {
     pub fn follow_symlink_mode(&self) -> Result<FollowSymlink, String> {
         match (
             self.no_dereference,
@@ -260,6 +500,7 @@ impl CLIArgs {
             _ => Err("only one of -P, -L, or -H may be specified".to_string()),
         }
     }
+
     pub fn parse_exclude_patterns(&self) -> Result<Vec<ExcludePattern>, String> {
         let mut patterns = Vec::new();
         for pattern_str in &self.exclude {
@@ -279,57 +520,6 @@ impl CLIArgs {
         }
         Ok(patterns)
     }
-
-    pub fn validate(mut self) -> Result<(Vec<PathBuf>, PathBuf, CopyOptions), String> {
-        let follow_symlink = self.follow_symlink_mode()?;
-        let mut options = CopyOptions::from(&self);
-        options.follow_symlink = follow_symlink;
-        let exclude_patterns = self.parse_exclude_patterns()?;
-        options.exclude_rules = build_exclude_rules(exclude_patterns)?;
-
-        if options.reflink.is_some() {
-            if options.hard_link {
-                return Err("--reflink and --link cannot be used together".to_string());
-            }
-            if options.symbolic_link.is_some() {
-                return Err("--reflink and --symbolic-link cannot be used together".to_string());
-            }
-        }
-
-        if options.symbolic_link.is_some() {
-            if options.hard_link {
-                return Err("--symbolic-link and --link cannot be used together".to_string());
-            }
-            if options.resume {
-                return Err("--symbolic-link and --continue cannot be used together".to_string());
-            }
-            if options.attributes_only {
-                return Err(
-                    "--symbolic-link and --attributes-only cannot be used together".to_string(),
-                );
-            }
-        }
-
-        if options.hard_link {
-            if options.resume {
-                return Err("--link and --continue cannot be used together".to_string());
-            }
-            if options.attributes_only {
-                return Err("--link and --attributes-only cannot be used together".to_string());
-            }
-        }
-        if options.attributes_only {
-            options.preserve = PreserveAttr::all();
-        }
-        let (sources, destination) = if let Some(target) = self.target_directory {
-            self.sources.push(self.destination);
-            (self.sources, target)
-        } else {
-            (self.sources, self.destination)
-        };
-
-        Ok((sources, destination, options))
-    }
 }
 
 #[cfg(test)]
@@ -339,27 +529,30 @@ mod tests {
     #[test]
     fn test_validate_symlink_and_hardlink_conflict() {
         let args = CLIArgs {
-            sources: vec![PathBuf::from("source.txt")],
-            destination: PathBuf::from("dest.txt"),
-            target_directory: None,
-            style: ProgressBarStyle::Default,
-            recursive: false,
-            concurrency: 4,
-            continue_copy: false,
-            force: false,
-            interactive: false,
-            parents: false,
-            preserve: None,
-            attributes_only: false,
-            remove_destination: false,
-            symbolic_link: Some(SymlinkMode::Auto),
-            hard_link: true,
-            dereference: true,
-            no_dereference: false,
-            dereference_command_line: false,
-            backup: None,
-            reflink: None,
-            exclude: Vec::new(),
+            command: Commands::Copy(CopyArgs {
+                sources: vec![PathBuf::from("source.txt")],
+                destination: PathBuf::from("dest.txt"),
+                target_directory: None,
+                recursive: false,
+                concurrency: 4,
+                resume: false,
+                force: false,
+                interactive: false,
+                parents: false,
+                preserve: None,
+                attributes_only: false,
+                remove_destination: false,
+                symbolic_link: Some(SymlinkMode::Auto),
+                hard_link: true,
+                dereference: true,
+                no_dereference: false,
+                dereference_command_line: false,
+                backup: None,
+                reflink: None,
+                exclude: Vec::new(),
+                no_config: false,
+                config: None,
+            }),
         };
 
         let result = args.validate();
@@ -370,27 +563,30 @@ mod tests {
     #[test]
     fn test_validate_symlink_and_resume_conflict() {
         let args = CLIArgs {
-            sources: vec![PathBuf::from("source.txt")],
-            destination: PathBuf::from("dest.txt"),
-            target_directory: None,
-            style: ProgressBarStyle::Default,
-            recursive: false,
-            concurrency: 4,
-            continue_copy: true,
-            force: false,
-            interactive: false,
-            parents: false,
-            preserve: None,
-            attributes_only: false,
-            remove_destination: false,
-            symbolic_link: Some(SymlinkMode::Auto),
-            hard_link: false,
-            dereference: true,
-            no_dereference: false,
-            dereference_command_line: false,
-            backup: None,
-            reflink: None,
-            exclude: Vec::new(),
+            command: Commands::Copy(CopyArgs {
+                sources: vec![PathBuf::from("source.txt")],
+                destination: PathBuf::from("dest.txt"),
+                target_directory: None,
+                recursive: false,
+                concurrency: 4,
+                resume: true,
+                force: false,
+                interactive: false,
+                parents: false,
+                preserve: None,
+                attributes_only: false,
+                remove_destination: false,
+                symbolic_link: Some(SymlinkMode::Auto),
+                hard_link: false,
+                dereference: true,
+                no_dereference: false,
+                dereference_command_line: false,
+                backup: None,
+                reflink: None,
+                exclude: Vec::new(),
+                no_config: false,
+                config: None,
+            }),
         };
 
         let result = args.validate();
@@ -401,27 +597,30 @@ mod tests {
     #[test]
     fn test_validate_hardlink_and_resume_conflict() {
         let args = CLIArgs {
-            sources: vec![PathBuf::from("source.txt")],
-            destination: PathBuf::from("dest.txt"),
-            target_directory: None,
-            style: ProgressBarStyle::Default,
-            recursive: false,
-            concurrency: 4,
-            continue_copy: true,
-            force: false,
-            interactive: false,
-            parents: false,
-            preserve: None,
-            attributes_only: false,
-            remove_destination: false,
-            symbolic_link: None,
-            hard_link: true,
-            dereference: true,
-            no_dereference: false,
-            dereference_command_line: false,
-            backup: None,
-            reflink: None,
-            exclude: Vec::new(),
+            command: Commands::Copy(CopyArgs {
+                sources: vec![PathBuf::from("source.txt")],
+                destination: PathBuf::from("dest.txt"),
+                target_directory: None,
+                recursive: false,
+                concurrency: 4,
+                resume: true,
+                force: false,
+                interactive: false,
+                parents: false,
+                preserve: None,
+                attributes_only: false,
+                remove_destination: false,
+                symbolic_link: None,
+                hard_link: true,
+                dereference: true,
+                no_dereference: false,
+                dereference_command_line: false,
+                backup: None,
+                reflink: None,
+                exclude: Vec::new(),
+                no_config: false,
+                config: None,
+            }),
         };
 
         let result = args.validate();
@@ -432,27 +631,30 @@ mod tests {
     #[test]
     fn test_validate_success() {
         let args = CLIArgs {
-            sources: vec![PathBuf::from("source.txt")],
-            destination: PathBuf::from("dest.txt"),
-            target_directory: None,
-            style: ProgressBarStyle::Default,
-            recursive: false,
-            concurrency: 4,
-            continue_copy: false,
-            force: false,
-            interactive: false,
-            parents: false,
-            preserve: None,
-            attributes_only: false,
-            remove_destination: false,
-            symbolic_link: None,
-            hard_link: false,
-            dereference: true,
-            no_dereference: false,
-            dereference_command_line: false,
-            backup: None,
-            reflink: None,
-            exclude: Vec::new(),
+            command: Commands::Copy(CopyArgs {
+                sources: vec![PathBuf::from("source.txt")],
+                destination: PathBuf::from("dest.txt"),
+                target_directory: None,
+                recursive: false,
+                concurrency: 4,
+                resume: false,
+                force: false,
+                interactive: false,
+                parents: false,
+                preserve: None,
+                attributes_only: false,
+                remove_destination: false,
+                symbolic_link: None,
+                hard_link: false,
+                dereference: true,
+                no_dereference: false,
+                dereference_command_line: false,
+                backup: None,
+                reflink: None,
+                exclude: Vec::new(),
+                no_config: false,
+                config: None,
+            }),
         };
 
         let result = args.validate();
