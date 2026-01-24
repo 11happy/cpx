@@ -5,6 +5,7 @@ repository = "https://github.com/11happy/cpx"
 readme = "README.md"
 keywords = ["copy", "file", "cli", "backup", "utility"]
 version = "0.1.0"
+authors = ["Bhuminjay Soni <bhuminjaysoni@gmail.com>"]
 license = "MIT"
 edition = "2024"
 
