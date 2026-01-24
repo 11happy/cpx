@@ -373,7 +373,7 @@ message = "green"
 
 **Result:**
 ```
-Copying: 42/100 [=========================>·········] files 67% | 1.2GB/1.8GB | 45.3MB/s | Elapsed: 00:27 | ETA:00:16
+Copying: 67/100 [=========================>·········] files 67% | 1.2GB/1.8GB | 45.3MB/s | Elapsed: 00:27 | ETA:00:16
 ```
 
 ## Complete Configuration Example
