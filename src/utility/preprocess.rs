@@ -192,7 +192,7 @@ pub fn should_skip_file(source: &Path, destination: &Path) -> io::Result<bool> {
 
     if let (Ok(src_modified), Ok(dest_modified)) =
         (src_metadata.modified(), dest_metadata.modified())
-        && src_modified < dest_modified
+        && src_modified <= dest_modified
     {
         return Ok(true);
     }
