@@ -120,18 +120,20 @@ fn execute_copy(plan: CopyPlan, options: &CopyOptions) -> CopyResult<()> {
         return Ok(());
     }
 
-    if options.symbolic_link.is_some() {
+    if !plan.symlinks.is_empty() {
         for symlink_task in &plan.symlinks {
             create_symlink(symlink_task).map_err(|_e| CopyError::SymlinkFailed {
                 source: symlink_task.source.clone(),
                 destination: symlink_task.destination.clone(),
             })?;
         }
-
         if plan.total_symlinks > 0 {
             println!("Created {} symbolic links", plan.total_symlinks);
         }
-        return Ok(());
+
+        if options.symbolic_link.is_some() {
+            return Ok(());
+        }
     }
 
     let overall_pb = if plan.total_files >= 1 && !options.interactive && !options.attributes_only {

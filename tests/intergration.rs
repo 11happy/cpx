@@ -801,7 +801,7 @@ fn test_parents_flag() {
 }
 
 #[test]
-fn test_parents_multiple_files() {
+fn test_parents_multiple_files_absolute() {
     let temp = assert_fs::TempDir::new().unwrap();
     let dest_dir = temp.child("dest");
     dest_dir.create_dir_all().unwrap();
@@ -823,9 +823,11 @@ fn test_parents_multiple_files() {
         .arg(dest_dir.path())
         .assert()
         .success();
+    let file1_rel = file1.path().strip_prefix("/").unwrap();
+    let file2_rel = file2.path().strip_prefix("/").unwrap();
 
-    dest_dir.child("dir1/sub1/file1.txt").assert("content1");
-    dest_dir.child("dir2/sub2/file2.txt").assert("content2");
+    dest_dir.child(file1_rel).assert("content1");
+    dest_dir.child(file2_rel).assert("content2");
 }
 
 #[test]
@@ -1068,4 +1070,465 @@ fn test_copy_very_long_filename() {
         .success();
 
     dest_dir.child(&long_name).assert("content");
+}
+
+#[test]
+fn test_config_init() {
+    let temp = assert_fs::TempDir::new().unwrap();
+
+    Command::new(cargo::cargo_bin!("cpx"))
+        .arg("config")
+        .arg("init")
+        .env("HOME", temp.path())
+        .env("XDG_CONFIG_HOME", temp.path().join(".config"))
+        .assert()
+        .success();
+
+    let config_path = temp.path().join(".config/cpx/cpxconfig.toml");
+    assert!(config_path.exists());
+
+    let contents = fs::read_to_string(&config_path).unwrap();
+    assert!(contents.contains("[exclude]"));
+    assert!(contents.contains("[copy]"));
+    assert!(contents.contains("[preserve]"));
+}
+
+#[test]
+fn test_config_init_force_overwrite() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let config_dir = temp.path().join(".config/cpx");
+    fs::create_dir_all(&config_dir).unwrap();
+
+    let config_path = config_dir.join("cpxconfig.toml");
+    fs::write(&config_path, "old config").unwrap();
+
+    Command::new(cargo::cargo_bin!("cpx"))
+        .arg("config")
+        .arg("init")
+        .arg("--force")
+        .env("HOME", temp.path())
+        .env("XDG_CONFIG_HOME", temp.path().join(".config"))
+        .assert()
+        .success();
+
+    let contents = fs::read_to_string(&config_path).unwrap();
+    assert_ne!(contents, "old config");
+}
+
+#[test]
+fn test_config_show() {
+    Command::new(cargo::cargo_bin!("cpx"))
+        .arg("config")
+        .arg("show")
+        .assert()
+        .success();
+}
+
+#[test]
+fn test_config_path() {
+    Command::new(cargo::cargo_bin!("cpx"))
+        .arg("config")
+        .arg("path")
+        .assert()
+        .success();
+}
+
+#[test]
+fn test_no_config_flag() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let config_dir = temp.path().join(".config/cpx");
+    fs::create_dir_all(&config_dir).unwrap();
+
+    let config_path = config_dir.join("cpxconfig.toml");
+    fs::write(
+        &config_path,
+        r#"
+[copy]
+force = true
+"#,
+    )
+    .unwrap();
+
+    let source = temp.child("source.txt");
+    let dest = temp.child("dest.txt");
+
+    source.write_str("new").unwrap();
+    dest.write_str("old").unwrap();
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(dest.path()).unwrap().permissions();
+        perms.set_mode(0o444);
+        fs::set_permissions(dest.path(), perms).unwrap();
+    }
+
+    // With --no-config, should fail without force
+    Command::new(cargo::cargo_bin!("cpx"))
+        .arg("--no-config")
+        .arg(source.path())
+        .arg(dest.path())
+        .env("HOME", temp.path())
+        .env("XDG_CONFIG_HOME", temp.path().join(".config"))
+        .assert()
+        .failure();
+}
+
+#[test]
+fn test_resume_skips_identical_files() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let source_dir = temp.child("source");
+    let dest_dir = temp.child("dest");
+
+    source_dir.create_dir_all().unwrap();
+    dest_dir.create_dir_all().unwrap();
+
+    // Create files that are already copied
+    source_dir.child("file1.txt").write_str("content1").unwrap();
+    source_dir.child("file2.txt").write_str("content2").unwrap();
+
+    std::thread::sleep(std::time::Duration::from_millis(100));
+
+    dest_dir.child("source").create_dir_all().unwrap();
+    dest_dir
+        .child("source/file1.txt")
+        .write_str("content1")
+        .unwrap();
+
+    // Create a file that needs updating
+    source_dir
+        .child("file3.txt")
+        .write_str("new content")
+        .unwrap();
+
+    Command::new(cargo::cargo_bin!("cpx"))
+        .arg("-r")
+        .arg("--resume")
+        .arg(source_dir.path())
+        .arg(dest_dir.path())
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Skipping 1"));
+}
+
+#[test]
+fn test_resume_with_size_mismatch() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let source = temp.child("source.txt");
+    let dest_dir = temp.child("dest");
+
+    source.write_str("new longer content").unwrap();
+
+    dest_dir.create_dir_all().unwrap();
+    let dest_file = dest_dir.child("source.txt");
+    dest_file.write_str("old").unwrap();
+
+    Command::new(cargo::cargo_bin!("cpx"))
+        .arg("--resume")
+        .arg(source.path())
+        .arg(dest_dir.path())
+        .assert()
+        .success();
+
+    dest_file.assert("new longer content");
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn test_reflink_auto() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let source = temp.child("source.txt");
+    let dest = temp.child("dest.txt");
+
+    source.write_str("reflink content").unwrap();
+
+    Command::new(cargo::cargo_bin!("cpx"))
+        .arg("--reflink")
+        .arg("auto")
+        .arg(source.path())
+        .arg(dest.path())
+        .assert()
+        .success();
+
+    dest.assert("reflink content");
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn test_reflink_never() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let source = temp.child("source.txt");
+    let dest = temp.child("dest.txt");
+
+    source.write_str("content").unwrap();
+
+    Command::new(cargo::cargo_bin!("cpx"))
+        .arg("--reflink")
+        .arg("never")
+        .arg(source.path())
+        .arg(dest.path())
+        .assert()
+        .success();
+
+    dest.assert("content");
+}
+
+#[test]
+fn test_copy_multiple_large_files() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let dest_dir = temp.child("dest");
+    dest_dir.create_dir_all().unwrap();
+
+    let size = 10 * 1024 * 1024; // 10MB each
+    let content = vec![0u8; size];
+
+    let mut files = Vec::new();
+    for i in 0..3 {
+        let file = temp.child(format!("large_{}.bin", i));
+        fs::write(file.path(), &content).unwrap();
+        files.push(file);
+    }
+
+    let mut cmd = Command::new(cargo::cargo_bin!("cpx"));
+    cmd.arg("-j").arg("2").arg("-t").arg(dest_dir.path());
+
+    for file in &files {
+        cmd.arg(file.path());
+    }
+
+    cmd.assert().success();
+
+    for i in 0..3 {
+        let dest_file = dest_dir.child(format!("large_{}.bin", i));
+        assert_eq!(fs::metadata(dest_file.path()).unwrap().len(), size as u64);
+    }
+}
+
+#[test]
+fn test_copy_file_with_different_buffer_sizes() {
+    let temp = assert_fs::TempDir::new().unwrap();
+
+    // Test different file sizes to trigger different buffer sizes
+    let test_sizes = vec![
+        (500 * 1024, "small"),        // < 1MB
+        (5 * 1024 * 1024, "medium"),  // 5MB
+        (100 * 1024 * 1024, "large"), // 100MB
+    ];
+
+    for (size, name) in test_sizes {
+        let source = temp.child(format!("source_{}.bin", name));
+        let dest = temp.child(format!("dest_{}.bin", name));
+
+        let content = vec![42u8; size];
+        fs::write(source.path(), &content).unwrap();
+
+        Command::new(cargo::cargo_bin!("cpx"))
+            .arg(source.path())
+            .arg(dest.path())
+            .assert()
+            .success();
+
+        assert_eq!(fs::metadata(dest.path()).unwrap().len(), size as u64);
+    }
+}
+
+#[test]
+fn test_implicit_copy_command() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let source = temp.child("source.txt");
+    let dest = temp.child("dest.txt");
+
+    source.write_str("implicit").unwrap();
+
+    // Should work without explicit "copy" subcommand
+    Command::new(cargo::cargo_bin!("cpx"))
+        .arg(source.path())
+        .arg(dest.path())
+        .assert()
+        .success();
+
+    dest.assert("implicit");
+}
+
+#[test]
+fn test_explicit_copy_command() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let source = temp.child("source.txt");
+    let dest = temp.child("dest.txt");
+
+    source.write_str("explicit").unwrap();
+
+    Command::new(cargo::cargo_bin!("cpx"))
+        .arg("copy")
+        .arg(source.path())
+        .arg(dest.path())
+        .assert()
+        .success();
+
+    dest.assert("explicit");
+}
+
+#[test]
+fn test_help_flag() {
+    Command::new(cargo::cargo_bin!("cpx"))
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Usage:"));
+}
+
+#[test]
+fn test_version_flag() {
+    Command::new(cargo::cargo_bin!("cpx"))
+        .arg("--version")
+        .assert()
+        .success();
+}
+
+#[test]
+fn test_copy_help() {
+    Command::new(cargo::cargo_bin!("cpx"))
+        .arg("copy")
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("recursive"));
+}
+
+#[test]
+#[cfg(unix)]
+fn test_copy_readonly_source() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    let source = temp.child("readonly.txt");
+    let dest = temp.child("dest.txt");
+
+    source.write_str("readonly content").unwrap();
+
+    let mut perms = fs::metadata(source.path()).unwrap().permissions();
+    perms.set_mode(0o444);
+    fs::set_permissions(source.path(), perms).unwrap();
+
+    Command::new(cargo::cargo_bin!("cpx"))
+        .arg(source.path())
+        .arg(dest.path())
+        .assert()
+        .success();
+
+    dest.assert("readonly content");
+}
+
+#[test]
+fn test_destination_parent_not_exist() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let source = temp.child("source.txt");
+    let dest = temp.child("nonexistent/dir/dest.txt");
+
+    source.write_str("content").unwrap();
+
+    Command::new(cargo::cargo_bin!("cpx"))
+        .arg(source.path())
+        .arg(dest.path())
+        .assert()
+        .failure();
+}
+
+#[test]
+fn test_copy_with_multiple_flags() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let source_dir = temp.child("source");
+    let dest_dir = temp.child("dest");
+
+    source_dir.create_dir_all().unwrap();
+    source_dir.child("file1.txt").write_str("content1").unwrap();
+    source_dir.child("file2.log").write_str("log").unwrap();
+    source_dir.child("subdir").create_dir_all().unwrap();
+    source_dir
+        .child("subdir/file3.txt")
+        .write_str("content3")
+        .unwrap();
+
+    Command::new(cargo::cargo_bin!("cpx"))
+        .arg("-r")
+        .arg("-f")
+        .arg("-p")
+        .arg("mode,timestamps")
+        .arg("-e")
+        .arg("*.log")
+        .arg("-j")
+        .arg("4")
+        .arg(source_dir.path())
+        .arg(dest_dir.path())
+        .assert()
+        .success();
+
+    dest_dir.child("source/file1.txt").assert("content1");
+    dest_dir.child("source/subdir/file3.txt").assert("content3");
+    assert!(!dest_dir.child("source/file2.log").path().exists());
+}
+
+#[test]
+fn test_copy_dotfiles() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let source_dir = temp.child("source");
+    let dest_dir = temp.child("dest");
+
+    source_dir.create_dir_all().unwrap();
+    source_dir
+        .child(".hidden")
+        .write_str("hidden content")
+        .unwrap();
+    source_dir.child(".config").create_dir_all().unwrap();
+    source_dir
+        .child(".config/app.conf")
+        .write_str("config")
+        .unwrap();
+
+    Command::new(cargo::cargo_bin!("cpx"))
+        .arg("-r")
+        .arg(source_dir.path())
+        .arg(dest_dir.path())
+        .assert()
+        .success();
+
+    dest_dir.child("source/.hidden").assert("hidden content");
+    dest_dir.child("source/.config/app.conf").assert("config");
+}
+
+#[test]
+fn test_copy_unicode_filenames() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let source = temp.child("файл.txt"); // Cyrillic
+    let dest_dir = temp.child("dest");
+
+    source.write_str("unicode content").unwrap();
+    dest_dir.create_dir_all().unwrap();
+
+    Command::new(cargo::cargo_bin!("cpx"))
+        .arg(source.path())
+        .arg(dest_dir.path())
+        .assert()
+        .success();
+
+    dest_dir.child("файл.txt").assert("unicode content");
+}
+
+#[test]
+fn test_copy_empty_directory() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let source_dir = temp.child("empty_source");
+    let dest_dir = temp.child("dest");
+
+    source_dir.create_dir_all().unwrap();
+
+    Command::new(cargo::cargo_bin!("cpx"))
+        .arg("-r")
+        .arg(source_dir.path())
+        .arg(dest_dir.path())
+        .assert()
+        .success();
+
+    assert!(dest_dir.child("empty_source").path().exists());
+    assert!(dest_dir.child("empty_source").path().is_dir());
 }

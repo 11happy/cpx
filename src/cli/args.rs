@@ -58,7 +58,7 @@ pub enum Commands {
 }
 
 #[derive(Parser, Debug)]
-#[command(name = "cpx")]
+#[command(name = "cpx",version = env!("CARGO_PKG_VERSION"))]
 pub struct CLIArgs {
     #[command(subcommand)]
     pub command: Commands,

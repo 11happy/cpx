@@ -368,6 +368,7 @@ pub fn preprocess_directory(
     {
         return Ok(plan);
     }
+
     let root_destination =
         if options.parents {
             with_parents(destination, source)
@@ -378,11 +379,13 @@ pub fn preprocess_directory(
         };
 
     plan.add_directory(Some(source.into()), root_destination.clone());
+
     let num_threads = num_cpus::get().min(8);
     let follow_symlink = match options.follow_symlink {
         FollowSymlink::NoDereference | FollowSymlink::CommandLineSymlink => false,
         FollowSymlink::Dereference => true,
     };
+
     let walk_root = match options.follow_symlink {
         FollowSymlink::CommandLineSymlink => {
             let meta = std::fs::symlink_metadata(source)?;
@@ -398,7 +401,9 @@ pub fn preprocess_directory(
         }
         _ => source.to_path_buf(),
     };
+
     let mut inode_groups = None;
+
     for entry in WalkDir::new(&walk_root)
         .skip_hidden(false)
         .parallelism(jwalk::Parallelism::RayonNewPool(num_threads))
@@ -410,23 +415,30 @@ pub fn preprocess_directory(
             reason: format!("Failed to read directory entry: {}", e),
         })?;
         let src_path = entry.path();
-
-        if src_path == source {
+        if src_path == walk_root {
             continue;
         }
+
         let relative = src_path
-            .strip_prefix(source)
+            .strip_prefix(&walk_root)
             .map_err(|_| CopyError::CopyFailed {
                 source: source.to_path_buf(),
                 destination: destination.to_path_buf(),
                 reason: "Failed to calculate relative path".to_string(),
             })?;
 
+        let full_source_path = if walk_root != source {
+            source.join(relative)
+        } else {
+            src_path.to_path_buf()
+        };
+
         if let Some(exclude_rules) = &options.exclude_rules
-            && should_exclude(&src_path, source, exclude_rules)
+            && should_exclude(&full_source_path, source, exclude_rules)
         {
             continue;
         }
+
         let dest_path = root_destination.join(relative);
         let metadata = entry.metadata().map_err(|e| CopyError::CopyFailed {
             source: src_path.to_path_buf(),
@@ -440,7 +452,7 @@ pub fn preprocess_directory(
             process_entry(
                 &mut plan,
                 &src_path,
-                source,
+                &walk_root,
                 dest_path,
                 &metadata,
                 options,
@@ -448,6 +460,7 @@ pub fn preprocess_directory(
             )?;
         }
     }
+
     plan.sort_files_descending();
     Ok(plan)
 }
