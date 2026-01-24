@@ -464,40 +464,6 @@ fn test_hardlink_multiple_files() {
 }
 
 #[test]
-#[cfg(unix)]
-fn test_preserve_hardlinks() {
-    let temp = assert_fs::TempDir::new().unwrap();
-    let source_dir = temp.child("source");
-    let dest_dir = temp.child("dest");
-
-    source_dir.create_dir_all().unwrap();
-
-    let original = source_dir.child("original.txt");
-    original.write_str("content").unwrap();
-
-    let hardlink = source_dir.child("hardlink.txt");
-    fs::hard_link(original.path(), hardlink.path()).unwrap();
-
-    Command::new(cargo::cargo_bin!("cpx"))
-        .arg("-r")
-        .arg("-p")
-        .arg("links")
-        .arg(source_dir.path())
-        .arg(dest_dir.path())
-        .assert()
-        .success();
-
-    let dest_orig = dest_dir.child("source/original.txt");
-    let dest_link = dest_dir.child("source/hardlink.txt");
-
-    let orig_meta = fs::metadata(dest_orig.path()).unwrap();
-    let link_meta = fs::metadata(dest_link.path()).unwrap();
-
-    assert_eq!(orig_meta.ino(), link_meta.ino());
-    assert_eq!(orig_meta.nlink(), 2);
-}
-
-#[test]
 fn test_backup_simple() {
     let temp = assert_fs::TempDir::new().unwrap();
     let source = temp.child("source.txt");

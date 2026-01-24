@@ -181,7 +181,7 @@ fn execute_copy(plan: CopyPlan, options: &CopyOptions) -> CopyResult<()> {
             plan.files
                 .par_iter()
                 .map(|file_task| {
-                    copy_core(
+                    let result = copy_core(
                         &file_task.source,
                         &file_task.destination,
                         file_task.size,
@@ -190,20 +190,28 @@ fn execute_copy(plan: CopyPlan, options: &CopyOptions) -> CopyResult<()> {
                         plan.total_files,
                         options,
                         hardlink_tracker.as_ref(),
-                    )
+                    );
+
+                    match result {
+                        Ok(()) => Ok(()),
+                        Err(e) => Err((file_task.source.clone(), file_task.destination.clone(), e)),
+                    }
                 })
                 .collect()
         });
 
         let mut interrupted = false;
-        let mut errors: Vec<String> = Vec::new();
+        let mut errors: Vec<(PathBuf, PathBuf, CopyError)> = Vec::new();
 
-        for (i, result) in results.into_iter().enumerate() {
-            if let Err(e) = result {
-                if e.kind() == io::ErrorKind::Interrupted {
-                    interrupted = true;
-                } else {
-                    errors.push(format!("File {}: {}", i, e));
+        for result in results.into_iter() {
+            if let Err((source, dest, e)) = result {
+                match e {
+                    CopyError::Io(ref io_err) if io_err.kind() == io::ErrorKind::Interrupted => {
+                        interrupted = true;
+                    }
+                    _ => {
+                        errors.push((source, dest, e));
+                    }
                 }
             }
         }
@@ -214,9 +222,9 @@ fn execute_copy(plan: CopyPlan, options: &CopyOptions) -> CopyResult<()> {
             }
 
             let completed = completed_files.load(Ordering::Relaxed);
-            eprintln!("\nSummary:");
-            eprintln!("Completed:  {} files", completed);
-            eprintln!("Remaining:  {} files", plan.total_files - completed);
+            eprintln!("\nOperation interrupted by user");
+            eprintln!("  Completed:  {} files", completed);
+            eprintln!("  Remaining:  {} files", plan.total_files - completed);
 
             return Err(CopyError::Io(io::Error::new(
                 io::ErrorKind::Interrupted,
@@ -226,13 +234,19 @@ fn execute_copy(plan: CopyPlan, options: &CopyOptions) -> CopyResult<()> {
 
         if !errors.is_empty() {
             if let Some(pb) = overall_pb {
-                pb.abandon_with_message("Copy completed with errors");
+                pb.abandon_with_message("Completed with errors");
             }
-            return Err(CopyError::CopyFailed {
-                source: PathBuf::new(),
-                destination: PathBuf::new(),
-                reason: format!("Errors occurred:\n{}", errors.join("\n")),
-            });
+            eprintln!("\nFailed to copy {} file(s):", errors.len());
+            for (source, _dest, err) in errors.iter().take(3) {
+                eprintln!("  {} - {}", source.display(), err);
+            }
+            if errors.len() > 3 {
+                eprintln!("  ... and {} more", errors.len() - 5);
+            }
+            return Err(CopyError::Io(io::Error::other(format!(
+                "{} file(s) failed to copy",
+                errors.len()
+            ))));
         }
     }
 
