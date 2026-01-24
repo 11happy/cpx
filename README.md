@@ -42,7 +42,7 @@ Copying 51% ██████████████████████�
 - **Rust** 1.70 or later
 
 
-### Quick Install 
+### Quick Install
 ```bash
 curl -fsSL https://raw.githubusercontent.com/11happy/cpx/main/install.sh | bash
 ```
@@ -85,17 +85,14 @@ cpx -r large_dir/ /backup/
 
 ### Common Use Cases
 ```bash
-# Backup project (exclude build artifacts)
+# Simple copy
+cpx source.txt destination.txt
+
+# exclude build artifacts
 cpx -r -e "node_modules" -e ".git" -e "target" my-project/ /backup/
 
 # Resume interrupted transfer
 cpx -r --resume large_dataset/ /backup/
-
-# Deploy with safety (interactive + backups)
-cpx -ri -b=numbered dist/ /var/www/production/
-
-# Instant snapshot on Btrfs/XFS
-cpx -r --reflink=always /data/ /snapshots/backup-$(date +%Y-%m-%d)/
 
 # Copy with full attribute preservation
 cpx -r -p=all photos/ /backup/photos/
