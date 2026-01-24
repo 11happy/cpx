@@ -117,7 +117,7 @@ cpx -r --reflink=always /data/ /snapshots/backup-$(date +%Y-%m-%d)/
 cpx -r -p=all photos/ /backup/photos/
 ```
 
-**👉 See [examples.md](docs/examples.md) for detailed workflows and real-world scenarios.**
+**See [examples.md](docs/examples.md) for detailed workflows and real-world scenarios.**
 
 ## Key Options
 ```
@@ -211,7 +211,7 @@ style = "detailed"
 mode = "auto"
 ```
 
-**👉 See [configuration.md](docs/configuration.md) for all options and use cases.**
+**See [configuration.md](docs/configuration.md) for all options and use cases.**
 
 ## Performance
 
@@ -223,7 +223,7 @@ mode = "auto"
 | 10GB file | 42.3s | 43.1s | **38.7s** |
 | Reflink (Btrfs) | 42.3s | N/A | **0.3s** |
 
-**👉 See [benchmarks.md](docs/benchmarks.md) for detailed methodology and more comparisons.**
+**See [benchmarks.md](docs/benchmarks.md) for detailed methodology and more comparisons.**
 
 ## Documentation
 
@@ -245,30 +245,6 @@ mode = "auto"
 - `copy_file_range` syscall (kernel 4.5+)
 - SELinux context preservation
 - Extended attributes support
-
-## Why cpx?
-
-### vs `cp`
-- ✅ Progress bars
-- ✅ Resume capability
-- ✅ Concurrent copying
-- ✅ Exclude patterns
-- ✅ Reflink support
-- ✅ Better performance
-
-### vs `rsync`
-- ✅ **Faster** for local copies
-- ✅ Simpler to use
-- ✅ Better progress display
-- ✅ Resume with checksums
-- ✅ Reflink support
-- ❌ No remote sync (local only)
-
-### Built with Rust
-- Memory safe - no segfaults
-- Fearless concurrency - no data races
-- Zero-cost abstractions
-- Modern tooling
 
 ## Contributing
 
@@ -317,9 +293,3 @@ Inspired by `ripgrep`, `fd`, and the modern Rust CLI ecosystem.
 Built with: [clap](https://github.com/clap-rs/clap), [indicatif](https://github.com/console-rs/indicatif), [rayon](https://github.com/rayon-rs/rayon), [jwalk](https://github.com/Byron/jwalk), and more.
 
 ---
-
-<div align="center">
-
-**[⭐ Star on GitHub](https://github.com/11happy/cpx)** • **[🐛 Report Bug](https://github.com/11happy/cpx/issues)** • **[💡 Request Feature](https://github.com/11happy/cpx/issues)**
-
-</div>
