@@ -46,7 +46,7 @@ Copying 51% ██████████████████████�
 
 ### From Source
 ```bash
-git clone https://github.com/yourusername/cpx.git
+git clone https://github.com/11happy/cpx.git
 cd cpx
 cargo install --path .
 cpx --version
@@ -59,7 +59,7 @@ cargo install cpx
 
 ### Pre-built Binaries (Coming Soon)
 
-Download from [Releases](https://github.com/yourusername/cpx/releases)
+Download from [Releases](https://github.com/11happy/cpx/releases)
 
 ## Quick Start
 
@@ -227,7 +227,7 @@ Contributions welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
 ### Quick Start for Developers
 ```bash
-git clone https://github.com/yourusername/cpx.git
+git clone https://github.com/11happy/cpx.git
 cd cpx
 
 # Run tests
