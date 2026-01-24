@@ -64,14 +64,9 @@ pub struct CLIArgs {
     pub command: Commands,
 }
 
-#[derive(Args, Debug)]
+#[derive(Args, Debug, Clone)]
 pub struct CopyArgs {
-    #[arg(long, value_name = "PATH", help = "Use custom config file")]
-    pub config: Option<PathBuf>,
-
-    #[arg(long, help = "Ignore all config files")]
-    pub no_config: bool,
-
+    // Input/Output Options
     #[arg(help = "Source file(s) or directory(ies)", required = true)]
     pub sources: Vec<PathBuf>,
 
@@ -86,6 +81,15 @@ pub struct CopyArgs {
     )]
     pub target_directory: Option<PathBuf>,
 
+    #[arg(
+        short = 'e',
+        long = "exclude",
+        value_name = "PATTERN",
+        help = "Exclude files matching pattern (can be specified multiple times, supports comma-separated values)"
+    )]
+    pub exclude: Vec<String>,
+
+    // Copy Behavior Options
     #[arg(short, long, help = "Copy directories recursively")]
     pub recursive: bool,
 
@@ -113,15 +117,6 @@ pub struct CopyArgs {
     pub parents: bool,
 
     #[arg(
-        short = 'p',
-        long = "preserve",
-        value_name = "ATTR_LIST",
-        default_missing_value = "",
-        help = "preserve the specified attributes"
-    )]
-    pub preserve: Option<String>,
-
-    #[arg(
         long = "attributes-only",
         help = "don't copy the file data, just the attributes"
     )]
@@ -133,6 +128,7 @@ pub struct CopyArgs {
     )]
     pub remove_destination: bool,
 
+    // Link and Symlink Options
     #[arg(
         short = 's',
         long = "symbolic-link",
@@ -171,6 +167,17 @@ pub struct CopyArgs {
     )]
     pub dereference_command_line: bool,
 
+    // Preservation Options
+    #[arg(
+        short = 'p',
+        long = "preserve",
+        value_name = "ATTR_LIST",
+        default_missing_value = "",
+        help = "preserve the specified attributes"
+    )]
+    pub preserve: Option<String>,
+
+    // Backup and Reflink Options
     #[arg(
         short = 'b',
         long = "backup",
@@ -190,13 +197,12 @@ pub struct CopyArgs {
     )]
     pub reflink: Option<ReflinkMode>,
 
-    #[arg(
-        short = 'e',
-        long = "exclude",
-        value_name = "PATTERN",
-        help = "Exclude files matching pattern (can be specified multiple times, supports comma-separated values)"
-    )]
-    pub exclude: Vec<String>,
+    // Config Options (Placed last as meta)
+    #[arg(long, value_name = "PATH", help = "Use custom config file")]
+    pub config: Option<PathBuf>,
+
+    #[arg(long, help = "Ignore all config files")]
+    pub no_config: bool,
 }
 
 #[derive(Debug, Clone)]

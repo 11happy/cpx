@@ -127,13 +127,13 @@ fn show_paths() -> std::io::Result<()> {
 
     let mut effective: Option<PathBuf> = None;
 
-    // 1️⃣ Project config
+    //Project config
     let project = PathBuf::from("./cpxconfig.toml");
     if project.exists() {
         effective = Some(project);
     }
 
-    // 2️⃣ User config
+    //User config
     if effective.is_none()
         && let Some(config_dir) = dirs::config_dir()
     {
@@ -143,7 +143,7 @@ fn show_paths() -> std::io::Result<()> {
         }
     }
 
-    // 3️⃣ System config (Unix)
+    //System config (Unix)
     #[cfg(unix)]
     if effective.is_none() {
         let system = PathBuf::from("/etc/cpx/config.toml");

@@ -1,0 +1,325 @@
+# cpx
+
+<div align="center">
+
+**A modern, fast file copy tool for Linux with progress bars, resume capability, and more.**
+
+[![Crates.io](https://img.shields.io/crates/v/cpx.svg)](https://crates.io/crates/cpx)
+[![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](LICENSE-MIT)
+[![Build Status](https://github.com/yourusername/cpx/workflows/CI/badge.svg)](https://github.com/yourusername/cpx/actions)
+
+[Features](#features) •
+[Installation](#installation) •
+[Quick Start](#quick-start) •
+[Documentation](#documentation)
+
+</div>
+
+---
+
+## Why cpx?
+
+`cpx` is a modern replacement for the traditional `cp` command, built with Rust for maximum performance and safety on Linux systems.
+```bash
+cpx -r projects/ /backup/
+Copying 51% ████░░░░ ETA:00:06
+```
+
+**Perfect for:**
+- Large file transfers with progress tracking
+- Resumable copies that survive interruptions
+- Development project backups (with smart exclusions)
+- Server deployments with safety features
+- CoW snapshots on Btrfs/XFS
+
+## Features
+
+### 🚀 **Performance First**
+- **Concurrent copying** - Parallel operations for maximum throughput
+- **Copy-on-Write support** - Instant copies on Btrfs/XFS filesystems
+- **Linux optimizations** - Uses `copy_file_range` for kernel-level efficiency
+- **Smart buffering** - Adaptive buffer sizes based on file characteristics
+
+See [benchmarks](docs/benchmarks.md) for detailed performance comparisons.
+
+### 📊 **Better User Experience**
+- **Progress bars** - Beautiful, real-time visual feedback (customisable via config)
+- **Resume capability** - Pick up interrupted transfers (with checksum verification)
+- **Interactive mode** - Confirm overwrites before they happen
+- **Detailed stats** - File count, speed, ETA, and more
+
+### 🎯 **Powerful & Flexible**
+- **Exclude patterns** - Skip files with gitignore-style globs
+- **Preserve attributes** - Maintain permissions, timestamps, ownership, xattr, SELinux context
+- **Backup modes** - Automatic versioning (simple, numbered, existing)
+- **Symlink handling** - Flexible symbolic and hard link support
+- **Configuration files** - Set project or system-wide defaults
+
+### 🛡️ **Reliable**
+- **Graceful interruption** - Clean Ctrl+C handling with partial file cleanup
+- **Error recovery** - Continue on errors with detailed reporting
+- **Checksum verification** - Resume mode validates file integrity
+- **Multiple backup strategies** - Never lose data on overwrites
+
+## Installation
+
+### Prerequisites
+
+- **Linux** (kernel 4.5+ recommended for fast copy)
+- **Rust** 1.70 or later
+
+### From Source
+```bash
+git clone https://github.com/yourusername/cpx.git
+cd cpx
+cargo install --path .
+cpx --version
+```
+
+### From Crates.io (Coming Soon)
+```bash
+cargo install cpx
+```
+
+### Pre-built Binaries (Coming Soon)
+
+Download from [Releases](https://github.com/yourusername/cpx/releases)
+
+## Quick Start
+
+### Basic Usage
+```bash
+# Copy a file
+cpx source.txt dest.txt
+
+# Copy directory recursively
+cpx -r source_dir/ dest_dir/
+
+# Copy with progress bar
+cpx -r large_dir/ /backup/
+```
+
+### Common Use Cases
+```bash
+# Backup project (exclude build artifacts)
+cpx -r -e "node_modules" -e ".git" -e "target" my-project/ /backup/
+
+# Resume interrupted transfer
+cpx -r --resume large_dataset/ /backup/
+
+# Deploy with safety (interactive + backups)
+cpx -ri -b=numbered dist/ /var/www/production/
+
+# Instant snapshot on Btrfs/XFS
+cpx -r --reflink=always /data/ /snapshots/backup-$(date +%Y-%m-%d)/
+
+# Copy with full attribute preservation
+cpx -r -p=all photos/ /backup/photos/
+```
+
+**👉 See [examples.md](docs/examples.md) for detailed workflows and real-world scenarios.**
+
+## Key Options
+```
+cpx [OPTIONS] <SOURCE>... <DESTINATION>
+
+Arguments:
+  <SOURCE>...       Source file(s) or directory(ies)
+  <DESTINATION>     Destination file or directory
+
+Input/Output Options:
+  -t, --target-directory <DIRECTORY>
+                           Copy all SOURCE arguments into DIRECTORY
+  -e, --exclude <PATTERN>  Exclude files matching pattern (supports globs, comma-separated)
+
+Copy Behavior:
+  -r, --recursive          Copy directories recursively
+  -j <N>                   Number of concurrent operations [default: 4]
+      --resume             Resume interrupted transfers (checksum verified)
+  -f, --force              Remove and retry if destination cannot be opened
+  -i, --interactive        Prompt before overwrite
+      --parents            Use full source file name under DIRECTORY
+      --attributes-only    Copy only attributes, not file data
+      --remove-destination Remove destination file before copying
+
+Link and Symlink Options:
+  -s, --symbolic-link [MODE]
+                           Create symlinks instead of copying [auto|absolute|relative]
+  -l, --link               Create hard links instead of copying
+  -P, --no-dereference     Never follow symbolic links in SOURCE
+  -L, --dereference        Always follow symbolic links in SOURCE
+  -H, --dereference-command-line
+                           Follow symbolic links only on command line
+
+Preservation:
+  -p, --preserve [ATTRS]   Preserve attributes [default|all|mode,timestamps,ownership,...]
+                           Available: mode, ownership, timestamps, links, context, xattr
+
+Backup and Reflink:
+  -b, --backup [MODE]      Backup existing files [none|simple|numbered|existing]
+      --reflink [WHEN]     CoW copy if supported [auto|always|never]
+
+Configuration:
+      --config <PATH>      Use custom config file
+      --no-config          Ignore all config files
+
+Other:
+  -h, --help               Print help information
+  -V, --version            Print version information
+```
+
+
+For complete usage examples, see [examples.md](docs/examples.md)
+
+For complete option reference, run `cpx --help`
+
+## Configuration
+
+Set defaults with configuration files:
+```bash
+# Create config with defaults
+cpx config init
+
+# View active configuration
+cpx config show
+
+# See config file location
+cpx config path
+```
+
+**Config locations (in priority order):**
+1. `./cpxconfig.toml` (project-level)
+2. `~/.config/cpx/cpxconfig.toml` (user-level)
+3. `/etc/cpx/cpxconfig.toml` (system-level, Unix only)
+
+**Example config** (`~/.config/cpx/cpxconfig.toml`):
+```toml
+[exclude]
+patterns = ["*.tmp", "*.log", "node_modules", ".git"]
+
+[copy]
+concurrency = 8
+recursive = false
+
+[preserve]
+mode = "default"
+
+[progress]
+style = "detailed"
+
+[reflink]
+mode = "auto"
+```
+
+**👉 See [configuration.md](docs/configuration.md) for all options and use cases.**
+
+## Performance
+
+`cpx` is built for speed. Quick comparison:
+
+| Task | cp | rsync | cpx |
+|------|-----|-------|-----|
+| 10K small files | 8.2s | 12.4s | **3.1s** |
+| 10GB file | 42.3s | 43.1s | **38.7s** |
+| Reflink (Btrfs) | 42.3s | N/A | **0.3s** |
+
+**👉 See [benchmarks.md](docs/benchmarks.md) for detailed methodology and more comparisons.**
+
+## Documentation
+
+- **[Examples](docs/examples.md)** - Real-world usage patterns and workflows
+- **[Configuration Guide](docs/configuration.md)** - Complete config reference
+- **[Benchmarks](docs/benchmarks.md)** - Performance analysis and comparisons
+- **[Contributing](CONTRIBUTING.md)** - How to contribute
+
+## Platform Support
+
+| Platform | Status | Notes |
+|----------|--------|-------|
+| **Linux** | ✅ Supported | Fast copy supported for (kernel 4.5+) |
+| macOS | 🔄 Planned | Basic support coming soon |
+| Windows | 🔄 Planned | Future release |
+
+
+**Linux-specific optimizations:**
+- `copy_file_range` syscall (kernel 4.5+)
+- SELinux context preservation
+- Extended attributes support
+
+## Why cpx?
+
+### vs `cp`
+- ✅ Progress bars
+- ✅ Resume capability
+- ✅ Concurrent copying
+- ✅ Exclude patterns
+- ✅ Reflink support
+- ✅ Better performance
+
+### vs `rsync`
+- ✅ **Faster** for local copies
+- ✅ Simpler to use
+- ✅ Better progress display
+- ✅ Resume with checksums
+- ✅ Reflink support
+- ❌ No remote sync (local only)
+
+### Built with Rust
+- Memory safe - no segfaults
+- Fearless concurrency - no data races
+- Zero-cost abstractions
+- Modern tooling
+
+## Contributing
+
+Contributions welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
+
+### Quick Start for Developers
+```bash
+git clone https://github.com/yourusername/cpx.git
+cd cpx
+
+# Run tests
+cargo test
+
+# Run clippy
+cargo clippy
+
+# Try it out
+cargo run -- -r test_data/ test_dest/
+```
+
+## Roadmap
+
+**Current (v0.1)**
+- [x] Core copy functionality
+- [x] Progress bars
+- [x] Resume capability
+- [x] Exclude patterns
+- [x] Configuration system
+- [x] Reflink support
+- [x] Hard link preservation
+
+**Upcoming (v0.2)**
+- [ ] macOS support
+- [ ] Windows support
+
+
+## License
+
+- MIT license ([LICENSE-MIT](LICENSE-MIT) or http://opensource.org/licenses/MIT)
+
+
+## Acknowledgments
+
+Inspired by `ripgrep`, `fd`, and the modern Rust CLI ecosystem.
+
+Built with: [clap](https://github.com/clap-rs/clap), [indicatif](https://github.com/console-rs/indicatif), [rayon](https://github.com/rayon-rs/rayon), [jwalk](https://github.com/Byron/jwalk), and more.
+
+---
+
+<div align="center">
+
+**[⭐ Star on GitHub](https://github.com/11happy/cpx)** • **[🐛 Report Bug](https://github.com/11happy/cpx/issues)** • **[💡 Request Feature](https://github.com/11happy/cpx/issues)**
+
+</div>
