@@ -18,6 +18,7 @@
 
 ### Full Dataset (13 GB, 773,996 files)
 
+cp:
 | Tool | Mean Time | Speedup |
 |------|-----------|---------|
 | cpx | **28.72s ± 1.46s** | **2.81× faster** |
@@ -25,10 +26,19 @@
 
 **Time Saved:** 51.84 seconds
 
+rsync:
+| Tool | Mean Time | Speedup |
+|------|-----------|---------|
+| cpx | **30.37s ± 0.82s** | **2.81× faster** |
+| rsync | 80.54s ± 2.567s | baseline |
+
+**Time Saved:** 50.54 seconds
+
 ---
 
 ## Per-Repository Results
 
+cp:
 | Repository | Files | cpx | cp | Speedup |
 |------------|-------|----------|-------------|---------|
 | **VSCode** | ~15k | 263ms | 1,084ms | **4.12×**  |
@@ -42,6 +52,21 @@
 | **OpenImageIO** | ~5k | 125ms | 258ms | **2.07×**  |
 | **Godot** | ~8k | 354ms | 550ms | **1.55×**  |
 | **OpenEXR** | ~2.5k | 273ms | 286ms | **1.04×**  |
+
+rsync:
+| Repository | Files | cpx | rsync | Speedup |
+|------------|-------|----------|-------------|---------|
+| **Kubernetes** | ~35k | 617.2ms | 3,097ms | **5.02×**  |
+| **Rust** | ~65k | 1,014ms | 4,604ms | **4.54×**  |
+| **Go** | ~12k | 340ms | 1,529ms | **4.49×**  |
+| **TensorFlow** | ~50k | 736ms | 3,100ms | **4.21×**  |
+| **Node.js** | ~45k | 1,198ms | 4,821ms | **4.02×**  |
+| **VSCode** | ~15k | 310ms | 1,190ms | **3.83×**  |
+| **Linux Kernel** | ~72k | 2,587ms | 8,868ms | **3.43×**  |
+| **Chromium** | ~450k | 14.76s | 47.74s | **3.23×**  |
+| **OpenImageIO** | ~5k | 120ms | 385ms | **3.21×**  |
+| **Godot** | ~8k | 392ms | 987ms | **2.52×**  |
+| **OpenEXR** | ~2.5k | 267ms | 588ms | **2.20×**  |
 
 ---
 
