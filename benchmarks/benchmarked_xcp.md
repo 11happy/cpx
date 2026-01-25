@@ -1,4 +1,4 @@
-# CPX vs GNU cp — cold cache benchmark
+# CPX vs xcp — cold cache benchmark
 
 ## Environment
 - CPU cores: 8

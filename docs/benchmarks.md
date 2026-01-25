@@ -70,7 +70,7 @@ rsync:
 
 ---
 
-
+See all hyperfine reports(cp,rsync,xcp) here https://github.com/11happy/cpx/tree/main/benchmarks
 
 ## Why faster ?
 
