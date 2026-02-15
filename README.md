@@ -107,6 +107,7 @@ Input/Output Options:
 
 Copy Behavior:
   -r, --recursive          Copy directories recursively
+  -d, --delete-source      Deletes the original file(s) after copying
   -j <N>                   Number of parallel operations [default: 4]
       --resume             Resume interrupted transfers (checksum verified)
   -f, --force              Remove and retry if destination cannot be opened
