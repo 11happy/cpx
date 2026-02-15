@@ -155,7 +155,7 @@ fn execute_copy(plan: CopyPlan, options: &CopyOptions) -> CopyResult<()> {
 
     // For interactive mode, process sequentially
     if options.interactive {
-        for file_task in plan.files {
+        for file_task in &plan.files {
             copy_core(
                 &file_task.source,
                 &file_task.destination,
@@ -166,6 +166,17 @@ fn execute_copy(plan: CopyPlan, options: &CopyOptions) -> CopyResult<()> {
                 options,
                 hardlink_tracker.as_ref(),
             )?;
+
+            // Remove source file after successful copy if delete_source is enabled (interactive mode)
+            if options.delete_source {
+                if let Err(e) = std::fs::remove_file(&file_task.source) {
+                    eprintln!(
+                        "Warning: Could not remove source file {}: {}",
+                        file_task.source.display(),
+                        e
+                    );
+                }
+            }
         }
     } else {
         let pool = rayon::ThreadPoolBuilder::new()
@@ -246,6 +257,19 @@ fn execute_copy(plan: CopyPlan, options: &CopyOptions) -> CopyResult<()> {
         }
     }
 
+    // Remove source files after successful copy if delete_source is enabled (parallel mode)
+    if options.delete_source && !options.interactive {
+        for file_task in &plan.files {
+            if let Err(e) = std::fs::remove_file(&file_task.source) {
+                eprintln!(
+                    "Warning: Could not remove source file {}: {}",
+                    file_task.source.display(),
+                    e
+                );
+            }
+        }
+    }
+
     if let Some(pb) = overall_pb {
         if matches!(options.progress_bar.style, ProgressBarStyle::Detailed)
             && !options.attributes_only
@@ -275,6 +299,7 @@ fn copy_core(
             return Ok(());
         }
         preserve::apply_preserve_attrs(source, destination, options.preserve)?;
+
         return Ok(());
     }
 
@@ -310,6 +335,7 @@ fn copy_core(
                 preserve::apply_preserve_attrs(source, destination, options.preserve)
                     .map_err(CopyError::from)?;
             }
+
             return Ok(());
         }
         // Continue with normal file copy if this is the first file in the inode group
@@ -335,6 +361,7 @@ fn copy_core(
                         preserve::apply_preserve_attrs(source, destination, options.preserve)
                             .map_err(CopyError::from)?;
                     }
+
                     return Ok(());
                 }
                 Err(e) if reflink_mode == ReflinkMode::Always => {
@@ -362,10 +389,12 @@ fn copy_core(
                 preserve::apply_preserve_attrs(source, destination, options.preserve)
                     .map_err(CopyError::from)?;
             }
+
             return Ok(());
         }
     }
 
+    // Copy file in chunks
     let mut src_file = std::fs::File::open(source)?;
     let dest_file = match std::fs::File::create(destination) {
         Ok(file) => file,
@@ -477,6 +506,7 @@ mod tests {
     fn default_copy_options() -> CopyOptions {
         CopyOptions {
             recursive: false,
+            delete_source: false,
             resume: false,
             force: false,
             interactive: false,
@@ -625,6 +655,25 @@ mod tests {
         assert!(dest.exists());
         let content = fs::read(&dest).unwrap();
         assert_eq!(content.len(), 0);
+    }
+
+    #[test]
+    fn test_copy_with_delete_source() {
+        let temp_dir = TempDir::new().unwrap();
+        let source = temp_dir.path().join("source.txt");
+        let dest = temp_dir.path().join("dest.txt");
+
+        fs::write(&source, b"test content for delete original").unwrap();
+
+        let mut options = default_copy_options();
+        options.delete_source = true;
+
+        copy(&source, &dest, &options).unwrap();
+        assert!(dest.exists());
+        let content = fs::read_to_string(&dest).unwrap();
+        assert_eq!(content, "test content for delete original");
+
+        assert!(!source.exists());
     }
 
     #[test]

@@ -93,6 +93,9 @@ pub struct CopyArgs {
     #[arg(short, long, help = "Copy directories recursively")]
     pub recursive: bool,
 
+    #[arg(short, long, help = "Deletes the original file(s) after copying")]
+    pub delete_source: bool,
+
     #[arg(
         short = 'j',
         default_value_t = 4,
@@ -208,6 +211,7 @@ pub struct CopyArgs {
 #[derive(Debug, Clone)]
 pub struct CopyOptions {
     pub recursive: bool,
+    pub delete_source: bool,
     pub parallel: usize,
     pub resume: bool,
     pub force: bool,
@@ -230,6 +234,7 @@ impl CopyOptions {
     pub fn none() -> Self {
         Self {
             recursive: false,
+            delete_source: false,
             parallel: 4,
             resume: false,
             force: false,
@@ -252,6 +257,7 @@ impl CopyOptions {
     pub fn from_config(config: &Config) -> Self {
         Self {
             recursive: config.copy.recursive,
+            delete_source: config.copy.delete_source,
             parallel: config.copy.parallel,
             resume: config.copy.resume,
             force: config.copy.force,
@@ -277,6 +283,7 @@ impl From<&CopyArgs> for CopyOptions {
     fn from(cli: &CopyArgs) -> Self {
         Self {
             recursive: cli.recursive,
+            delete_source: cli.delete_source,
             parallel: cli.parallel,
             resume: cli.resume,
             force: cli.force,
@@ -389,6 +396,9 @@ fn apply_cli_overrides(options: &mut CopyOptions, copy_args: &CopyArgs) -> Resul
     // Boolean flags - when present, they override
     if copy_args.recursive {
         options.recursive = true;
+    }
+    if copy_args.delete_source {
+        options.delete_source = true;
     }
     if copy_args.force {
         options.force = true;
@@ -524,6 +534,7 @@ mod tests {
                 destination: PathBuf::from("dest.txt"),
                 target_directory: None,
                 recursive: false,
+                delete_source: false,
                 parallel: 4,
                 resume: false,
                 force: false,
@@ -558,6 +569,7 @@ mod tests {
                 destination: PathBuf::from("dest.txt"),
                 target_directory: None,
                 recursive: false,
+                delete_source: false,
                 parallel: 4,
                 resume: true,
                 force: false,
@@ -592,6 +604,7 @@ mod tests {
                 destination: PathBuf::from("dest.txt"),
                 target_directory: None,
                 recursive: false,
+                delete_source: false,
                 parallel: 4,
                 resume: true,
                 force: false,
@@ -626,6 +639,7 @@ mod tests {
                 destination: PathBuf::from("dest.txt"),
                 target_directory: None,
                 recursive: false,
+                delete_source: false,
                 parallel: 4,
                 resume: false,
                 force: false,
