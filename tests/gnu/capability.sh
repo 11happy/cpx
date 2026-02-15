@@ -5,7 +5,13 @@
 
 set -eu
 fail=0
-CPX=/home/happy/.cargo/bin/cpx # adjust accordingly
+CPX="${CPX_PATH:-$(command -v cpx 2>/dev/null || echo "")}"
+if [ -z "$CPX" ]; then
+  for candidate in "$HOME/.local/bin/cpx" "$HOME/.cargo/bin/cpx" "/usr/local/bin/cpx" "/usr/bin/cpx"; do
+    [ -x "$candidate" ] && CPX="$candidate" && break
+  done
+fi
+[ -x "$CPX" ] || { echo "SKIP: cpx not found"; exit 0; }
 
 [ "$(id -u)" -eq 0 ] || { echo "SKIP: must run as root"; exit 0; }
 command -v setcap >/dev/null 2>&1 || { echo "SKIP: setcap not found"; exit 0; }

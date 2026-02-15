@@ -14,14 +14,59 @@ NC='\033[0m'
 # ----------------------------------------------------------------------------
 # CONFIG
 # ----------------------------------------------------------------------------
-BENCH_DIR="/home/happy/cpx_multi_bench"
+BENCH_DIR="${BENCH_DIR:-/tmp/cpx_multi_bench}"
 REPOS_DIR="$BENCH_DIR/repos"
-CPX_PATH="/home/happy/cpx/cpx"   # adjust if needed
-# CPX_PATH_TEMP = "/.cargo/bin/cpx"
-THREADS=16
-RUNS=6
+THREADS="${THREADS:-$(nproc)}"
+RUNS="${RUNS:-6}"
 
 MODE="${1:-warm}"  # warm | cold
+
+# ----------------------------------------------------------------------------
+# FIND CPX BINARY
+# ----------------------------------------------------------------------------
+find_cpx() {
+    # 1. Honour explicit CPX_PATH environment variable
+    if [ -n "${CPX_PATH:-}" ] && [ -x "$CPX_PATH" ]; then
+        echo "$CPX_PATH"
+        return 0
+    fi
+
+    # 2. Check if cpx is already on PATH
+    if command -v cpx &>/dev/null; then
+        command -v cpx
+        return 0
+    fi
+
+    # 3. Common install locations
+    local candidates=(
+        "$HOME/.local/bin/cpx"
+        "$HOME/.cargo/bin/cpx"
+        "/usr/local/bin/cpx"
+        "/usr/bin/cpx"
+    )
+
+    for candidate in "${candidates[@]}"; do
+        if [ -x "$candidate" ]; then
+            echo "$candidate"
+            return 0
+        fi
+    done
+
+    # 4. Look relative to the script / repo directory
+    local script_dir
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    local repo_dir
+    repo_dir="$(dirname "$script_dir")"
+
+    for candidate in "$repo_dir/cpx" "$repo_dir/target/release/cpx" "$repo_dir/target/debug/cpx"; do
+        if [ -x "$candidate" ]; then
+            echo "$candidate"
+            return 0
+        fi
+    done
+
+    return 1
+}
 
 # ----------------------------------------------------------------------------
 # PRECHECKS
@@ -29,10 +74,42 @@ MODE="${1:-warm}"  # warm | cold
 echo -e "${GREEN}=== CPX vs GNU cp Benchmark ($MODE cache) ===${NC}"
 echo ""
 
-if [ ! -x "$CPX_PATH" ]; then
-    echo -e "${RED}Error: cpx not found at $CPX_PATH${NC}"
-    exit 1
+CPX_PATH="$(find_cpx || true)"
+
+if [ -z "$CPX_PATH" ]; then
+    echo -e "${RED}Error: cpx binary not found.${NC}"
+    echo ""
+    echo -e "${YELLOW}Searched in:${NC}"
+    echo "  • \$CPX_PATH environment variable"
+    echo "  • \$PATH (command -v cpx)"
+    echo "  • ~/.local/bin/cpx"
+    echo "  • ~/.cargo/bin/cpx"
+    echo "  • /usr/local/bin/cpx"
+    echo "  • /usr/bin/cpx"
+    echo "  • <repo>/cpx, <repo>/target/release/cpx, <repo>/target/debug/cpx"
+    echo ""
+    echo -e "${YELLOW}Install cpx using one of:${NC}"
+    echo "  curl -fsSL https://raw.githubusercontent.com/11happy/cpx/main/install.sh | bash"
+    echo "  cargo install cpx-cli"
+    echo ""
+    read -p "Would you like to install cpx now? (Y/n): " -n 1 -r
+    echo
+    if [[ ! $REPLY =~ ^[Nn]$ ]]; then
+        echo -e "${BLUE}Installing cpx...${NC}"
+        curl -fsSL https://raw.githubusercontent.com/11happy/cpx/main/install.sh | bash
+        echo ""
+        CPX_PATH="$(find_cpx || true)"
+        if [ -z "$CPX_PATH" ]; then
+            echo -e "${RED}Installation succeeded but cpx still not found in expected locations.${NC}"
+            echo -e "${YELLOW}Try adding ~/.local/bin to your PATH and re-running.${NC}"
+            exit 1
+        fi
+    else
+        exit 1
+    fi
 fi
+
+echo -e "${GREEN}Found cpx at: $CPX_PATH${NC}"
 
 if ! command -v hyperfine &>/dev/null; then
     echo -e "${RED}Error: hyperfine not found (cargo install hyperfine)${NC}"
@@ -80,6 +157,7 @@ declare -A REPOS=(
 # CLONE
 # ----------------------------------------------------------------------------
 echo -e "${YELLOW}Cloning repositories...${NC}"
+mkdir -p "$REPOS_DIR"
 cd "$REPOS_DIR"
 
 for name in "${!REPOS[@]}"; do
