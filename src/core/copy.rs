@@ -177,12 +177,11 @@ fn execute_copy(plan: CopyPlan, options: &CopyOptions) -> CopyResult<()> {
     // For interactive mode, process sequentially
     if options.interactive {
         // Prompt once for move_files confirmation
-        if options.move_files {
-            if let Some(ref source) = plan.source {
-                if !prompt_deletion(source)? {
-                    return Ok(());
-                }
-            }
+        if options.move_files
+            && let Some(ref source) = plan.source
+            && !prompt_deletion(source)?
+        {
+            return Ok(());
         }
         for file_task in &plan.files {
             if options.move_files {
