@@ -12,7 +12,7 @@ pub struct ExcludeConfig {
 pub struct CopyConfig {
     pub parallel: usize,
     pub recursive: bool,
-    pub delete_source: bool,
+    pub move_files: bool,
     pub parents: bool,
     pub force: bool,
     pub interactive: bool,
@@ -85,7 +85,7 @@ pub struct Config {
 impl Default for CopyConfig {
     fn default() -> Self {
         Self {
-            delete_source: false,
+            move_files: false,
             parallel: 4,
             recursive: false,
             parents: false,
