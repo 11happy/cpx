@@ -32,7 +32,8 @@ pub struct DirectoryTask {
 
 #[derive(Debug, Clone)]
 pub struct SymlinkTask {
-    pub source: PathBuf,
+    pub symlink_path: PathBuf, // The actual symlink file path
+    pub source: PathBuf,       // The target the symlink points to
     pub destination: PathBuf,
     pub kind: SymlinkKind,
 }
@@ -55,6 +56,7 @@ pub struct CopyPlan {
     pub total_hardlinks: usize,
     pub skipped_files: usize,
     pub skipped_size: u64,
+    pub source: Option<PathBuf>,
 }
 
 impl Default for CopyPlan {
@@ -76,6 +78,7 @@ impl CopyPlan {
             total_hardlinks: 0,
             skipped_files: 0,
             skipped_size: 0,
+            source: None,
         }
     }
 
@@ -119,9 +122,16 @@ impl CopyPlan {
         });
     }
 
-    pub fn add_symlink(&mut self, source: PathBuf, destination: PathBuf, kind: SymlinkKind) {
+    pub fn add_symlink(
+        &mut self,
+        symlink_path: PathBuf,
+        source: PathBuf,
+        destination: PathBuf,
+        kind: SymlinkKind,
+    ) {
         self.remove_existing_task(&destination);
         self.symlinks.push(SymlinkTask {
+            symlink_path,
             source,
             destination,
             kind,
@@ -267,19 +277,24 @@ fn process_entry(
 
     if metadata.file_type().is_symlink() {
         if !matches!(options.follow_symlink, FollowSymlink::Dereference) {
+            let original_target = std::fs::read_link(source)?;
             if let Some(mode) = options.symbolic_link {
                 let kind = symlink_kind_from_mode(source, mode);
-                plan.add_symlink(source.to_path_buf(), dest_path, kind);
+                plan.add_symlink(source.to_path_buf(), original_target, dest_path, kind);
             } else {
-                let original_target = std::fs::read_link(source)?;
-                plan.add_symlink(original_target, dest_path, SymlinkKind::PreserveExact);
+                plan.add_symlink(
+                    source.to_path_buf(),
+                    original_target,
+                    dest_path,
+                    SymlinkKind::PreserveExact,
+                );
             }
         }
     } else if options.hard_link {
         plan.add_hardlink(source.to_path_buf(), dest_path);
     } else if let Some(mode) = options.symbolic_link {
         let kind = symlink_kind_from_mode(source, mode);
-        plan.add_symlink(source.to_path_buf(), dest_path, kind);
+        plan.add_symlink(source.to_path_buf(), source.to_path_buf(), dest_path, kind);
     } else if options.resume && should_skip_file(source, &dest_path)? {
         plan.mark_skipped(metadata.len());
     } else {
@@ -778,13 +793,20 @@ mod tests {
     #[test]
     fn test_copy_plan_add_symlink() {
         let mut plan = CopyPlan::new();
+        let symlink_path = PathBuf::from("/source/link");
         let source = PathBuf::from("/source/file.txt");
-        let dest = PathBuf::from("/dest/file.txt");
+        let dest = PathBuf::from("/dest/link");
 
-        plan.add_symlink(source.clone(), dest.clone(), SymlinkKind::AbsoluteToSource);
+        plan.add_symlink(
+            symlink_path.clone(),
+            source.clone(),
+            dest.clone(),
+            SymlinkKind::AbsoluteToSource,
+        );
 
         assert_eq!(plan.total_symlinks, 1);
         assert_eq!(plan.symlinks.len(), 1);
+        assert_eq!(plan.symlinks[0].symlink_path, symlink_path);
         assert_eq!(plan.symlinks[0].source, source);
         assert_eq!(plan.symlinks[0].destination, dest);
     }

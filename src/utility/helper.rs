@@ -3,9 +3,12 @@ use super::progress_bar::{ProgressBarStyle, ProgressOptions};
 use crate::cli::args::{BackupMode, CopyOptions, FollowSymlink, ReflinkMode, SymlinkMode};
 use crate::config::schema::Config;
 use crate::error::{CopyError, CopyResult};
+use crate::utility::backup::{create_backup, generate_backup_path};
 use crate::utility::preprocess::HardlinkTask;
+use indicatif::ProgressBar;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 pub fn create_directories(dirs: &[crate::utility::preprocess::DirectoryTask]) -> io::Result<()> {
     let mut dirs: Vec<_> = dirs.iter().collect();
@@ -100,6 +103,23 @@ pub fn prompt_overwrite(path: &Path) -> io::Result<bool> {
     Ok(input.trim().eq_ignore_ascii_case("y"))
 }
 
+pub fn prompt_deletion(path: &Path) -> io::Result<bool> {
+    use std::io::{Write, stdin, stdout};
+
+    if path.is_dir() {
+        print!("delete all the files in '{}' (y/n): ", path.display());
+    } else {
+        print!("delete file '{}' (y/n): ", path.display());
+    }
+
+    stdout().flush()?;
+
+    let mut input = String::new();
+    stdin().read_line(&mut input)?;
+
+    Ok(input.trim().eq_ignore_ascii_case("y"))
+}
+
 pub fn with_parents(dest: &Path, source: &Path) -> PathBuf {
     let skip_count = if source.is_absolute() { 1 } else { 0 };
     let components = source.components().skip(skip_count);
@@ -173,6 +193,126 @@ pub fn parse_reflink_mode(s: &str) -> Option<ReflinkMode> {
         "always" => Some(ReflinkMode::Always),
         "never" => Some(ReflinkMode::Never),
         _ => None,
+    }
+}
+
+pub fn move_file(
+    source: &Path,
+    destination: &Path,
+    overall_pb: Option<&ProgressBar>,
+    completed_files: &AtomicUsize,
+    total_files: usize,
+    options: &CopyOptions,
+) -> CopyResult<()> {
+    // Handle backup if needed
+    if let Some(backup_mode) = options.backup
+        && backup_mode != BackupMode::None
+        && destination.try_exists().unwrap_or(false)
+    {
+        let backup_path = generate_backup_path(destination, backup_mode)?;
+        let _ = create_backup(destination, &backup_path);
+    }
+
+    if options.remove_destination && destination.try_exists().unwrap_or(false) {
+        let _ = std::fs::remove_file(destination);
+    }
+
+    // Get file size before rename for progress tracking
+    let file_size = std::fs::metadata(source).map(|m| m.len()).unwrap_or(0);
+
+    // Perform the rename
+    std::fs::rename(source, destination).map_err(|e| CopyError::CopyFailed {
+        source: source.to_path_buf(),
+        destination: destination.to_path_buf(),
+        reason: format!("Failed to move file: {}", e),
+    })?;
+
+    // Update progress
+    if let Some(pb) = overall_pb {
+        pb.inc(file_size);
+    }
+    update_progress(overall_pb, completed_files, total_files, options);
+
+    Ok(())
+}
+
+pub fn move_symlink(task: &SymlinkTask, options: &CopyOptions) -> CopyResult<()> {
+    if task.destination.try_exists()? {
+        if options.interactive && !prompt_overwrite(&task.destination)? {
+            return Ok(());
+        }
+
+        if options.force || options.remove_destination {
+            if let Err(_e) = std::fs::remove_file(&task.destination) {
+                return Err(CopyError::SymlinkFailed {
+                    source: task.symlink_path.clone(),
+                    destination: task.destination.clone(),
+                });
+            }
+        } else {
+            return Err(CopyError::FileExists(task.destination.clone()));
+        }
+    }
+
+    // Move the symlink file itself, not the target
+    std::fs::rename(&task.symlink_path, &task.destination).map_err(|_e| {
+        CopyError::SymlinkFailed {
+            source: task.symlink_path.clone(),
+            destination: task.destination.clone(),
+        }
+    })?;
+
+    Ok(())
+}
+
+pub fn move_hardlink(task: &HardlinkTask, options: &CopyOptions) -> CopyResult<()> {
+    if task.destination.try_exists()? {
+        if options.interactive && !prompt_overwrite(&task.destination)? {
+            return Ok(());
+        }
+
+        if options.force || options.remove_destination {
+            if let Err(_e) = std::fs::remove_file(&task.destination) {
+                return Err(CopyError::HardlinkFailed {
+                    source: task.source.clone(),
+                    destination: task.destination.clone(),
+                });
+            }
+        } else {
+            return Err(CopyError::FileExists(task.destination.clone()));
+        }
+    }
+
+    // Create the hardlink at destination
+    std::fs::hard_link(&task.source, &task.destination).map_err(|_e| {
+        CopyError::HardlinkFailed {
+            source: task.source.clone(),
+            destination: task.destination.clone(),
+        }
+    })?;
+
+    // Remove the source
+    if let Err(_e) = std::fs::remove_file(&task.source) {
+        eprintln!(
+            "Warning: Could not remove source file {} after moving hardlink",
+            task.source.display()
+        );
+    }
+
+    Ok(())
+}
+
+pub fn update_progress(
+    overall_pb: Option<&ProgressBar>,
+    completed_files: &AtomicUsize,
+    total_files: usize,
+    options: &CopyOptions,
+) {
+    let completed = completed_files.fetch_add(1, Ordering::Relaxed) + 1;
+    if let Some(pb) = overall_pb
+        && matches!(options.progress_bar.style, ProgressBarStyle::Detailed)
+    {
+        pb.set_message(format!("Copying: {}/{} files", completed, total_files));
     }
 }
 
@@ -300,6 +440,7 @@ mod tests {
         fs::write(&source, b"test content").unwrap();
 
         let task = SymlinkTask {
+            symlink_path: source.clone(),
             source: source.clone(),
             destination: dest.clone(),
             kind: SymlinkKind::AbsoluteToSource,
@@ -326,6 +467,7 @@ mod tests {
         fs::write(&source, b"test content").unwrap();
 
         let task = SymlinkTask {
+            symlink_path: source.clone(),
             source: source.clone(),
             destination: dest.clone(),
             kind: SymlinkKind::RelativeToSource,
@@ -352,6 +494,7 @@ mod tests {
         fs::write(source_dir.join("file.txt"), b"content").unwrap();
 
         let task = SymlinkTask {
+            symlink_path: source_dir.clone(),
             source: source_dir.clone(),
             destination: dest_link.clone(),
             kind: SymlinkKind::AbsoluteToSource,
@@ -376,6 +519,7 @@ mod tests {
         let dest = dest_dir.join("link.txt");
 
         let task = SymlinkTask {
+            symlink_path: source.clone(),
             source: source.clone(),
             destination: dest.clone(),
             kind: SymlinkKind::RelativeToSource,
@@ -397,6 +541,7 @@ mod tests {
         let dest = temp_dir.path().join("link.txt");
 
         let task = SymlinkTask {
+            symlink_path: source.clone(),
             source: source.clone(),
             destination: dest.clone(),
             kind: SymlinkKind::AbsoluteToSource,
@@ -414,6 +559,7 @@ mod tests {
         let dest = temp_dir.path().join("link.txt");
 
         let task = SymlinkTask {
+            symlink_path: source.clone(),
             source: source.clone(),
             destination: dest.clone(),
             kind: SymlinkKind::RelativeToSource,

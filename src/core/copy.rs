@@ -4,7 +4,8 @@ use crate::core::fast_copy::fast_copy;
 use crate::error::{CopyError, CopyResult};
 use crate::utility::backup::{create_backup, generate_backup_path};
 use crate::utility::helper::{
-    create_directories, create_hardlink, create_symlink, prompt_overwrite,
+    create_directories, create_hardlink, create_symlink, move_file, move_hardlink, move_symlink,
+    prompt_deletion, prompt_overwrite, update_progress,
 };
 use crate::utility::preprocess::{
     CopyPlan, preprocess_directory, preprocess_file, preprocess_multiple,
@@ -13,6 +14,7 @@ use crate::utility::preserve::{self, HardLinkTracker, PreserveAttr};
 use crate::utility::progress_bar::ProgressBarStyle;
 use indicatif::ProgressBar;
 use rayon::prelude::*;
+
 use std::io::{self, Read, Write};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -28,7 +30,7 @@ pub fn copy(source: &Path, destination: &Path, options: &CopyOptions) -> CopyRes
     let source_root = source.parent().unwrap_or(source);
     let destination_metadata = std::fs::metadata(destination).ok();
 
-    let plan = if source_metadata.is_dir() {
+    let mut plan = if source_metadata.is_dir() {
         if !options.recursive {
             return Err(CopyError::CopyFailed {
                 source: source.to_path_buf(),
@@ -70,6 +72,7 @@ pub fn copy(source: &Path, destination: &Path, options: &CopyOptions) -> CopyRes
         eprintln!("Skipping {} files that already exist", plan.skipped_files);
     }
 
+    plan.source = Some(source.to_path_buf());
     execute_copy(plan, options)
 }
 
@@ -78,7 +81,7 @@ pub fn multiple_copy(
     destination: PathBuf,
     options: &CopyOptions,
 ) -> CopyResult<()> {
-    let plan = preprocess_multiple(&sources, &destination, options).map_err(|e| {
+    let mut plan = preprocess_multiple(&sources, &destination, options).map_err(|e| {
         CopyError::CopyFailed {
             source: sources[0].clone(),
             destination: destination.clone(),
@@ -88,6 +91,7 @@ pub fn multiple_copy(
     if plan.skipped_files > 0 {
         eprintln!("Skipping {} files that already exist", plan.skipped_files);
     }
+    plan.source = Some(sources[0].clone());
     execute_copy(plan, options)
 }
 
@@ -122,17 +126,34 @@ fn execute_copy(plan: CopyPlan, options: &CopyOptions) -> CopyResult<()> {
 
     if !plan.symlinks.is_empty() {
         for symlink_task in &plan.symlinks {
-            create_symlink(symlink_task).map_err(|_e| CopyError::SymlinkFailed {
-                source: symlink_task.source.clone(),
-                destination: symlink_task.destination.clone(),
-            })?;
+            if options.move_files {
+                move_symlink(symlink_task, options)?;
+            } else {
+                create_symlink(symlink_task).map_err(|_e| CopyError::SymlinkFailed {
+                    source: symlink_task.source.clone(),
+                    destination: symlink_task.destination.clone(),
+                })?;
+            }
         }
         if plan.total_symlinks > 0 {
-            println!("Created {} symbolic links", plan.total_symlinks);
+            if options.move_files {
+                println!("Moved {} symbolic links", plan.total_symlinks);
+            } else {
+                println!("Created {} symbolic links", plan.total_symlinks);
+            }
         }
 
         if options.symbolic_link.is_some() {
             return Ok(());
+        }
+    }
+
+    if options.move_files && !plan.hardlinks.is_empty() {
+        for hardlink_task in &plan.hardlinks {
+            move_hardlink(hardlink_task, options)?;
+        }
+        if plan.total_hardlinks > 0 {
+            println!("Moved {} hard links", plan.total_hardlinks);
         }
     }
 
@@ -155,17 +176,35 @@ fn execute_copy(plan: CopyPlan, options: &CopyOptions) -> CopyResult<()> {
 
     // For interactive mode, process sequentially
     if options.interactive {
-        for file_task in plan.files {
-            copy_core(
-                &file_task.source,
-                &file_task.destination,
-                file_task.size,
-                overall_pb.as_deref(),
-                &completed_files,
-                plan.total_files,
-                options,
-                hardlink_tracker.as_ref(),
-            )?;
+        // Prompt once for move_files confirmation
+        if options.move_files
+            && let Some(ref source) = plan.source
+            && !prompt_deletion(source)?
+        {
+            return Ok(());
+        }
+        for file_task in &plan.files {
+            if options.move_files {
+                move_file(
+                    &file_task.source,
+                    &file_task.destination,
+                    overall_pb.as_deref(),
+                    &completed_files,
+                    plan.total_files,
+                    options,
+                )?;
+            } else {
+                copy_core(
+                    &file_task.source,
+                    &file_task.destination,
+                    file_task.size,
+                    overall_pb.as_deref(),
+                    &completed_files,
+                    plan.total_files,
+                    options,
+                    hardlink_tracker.as_ref(),
+                )?;
+            }
         }
     } else {
         let pool = rayon::ThreadPoolBuilder::new()
@@ -181,16 +220,27 @@ fn execute_copy(plan: CopyPlan, options: &CopyOptions) -> CopyResult<()> {
             plan.files
                 .par_iter()
                 .map(|file_task| {
-                    let result = copy_core(
-                        &file_task.source,
-                        &file_task.destination,
-                        file_task.size,
-                        overall_pb.as_deref(),
-                        &completed_files,
-                        plan.total_files,
-                        options,
-                        hardlink_tracker.as_ref(),
-                    );
+                    let result = if options.move_files {
+                        move_file(
+                            &file_task.source,
+                            &file_task.destination,
+                            overall_pb.as_deref(),
+                            &completed_files,
+                            plan.total_files,
+                            options,
+                        )
+                    } else {
+                        copy_core(
+                            &file_task.source,
+                            &file_task.destination,
+                            file_task.size,
+                            overall_pb.as_deref(),
+                            &completed_files,
+                            plan.total_files,
+                            options,
+                            hardlink_tracker.as_ref(),
+                        )
+                    };
 
                     match result {
                         Ok(()) => Ok(()),
@@ -246,6 +296,11 @@ fn execute_copy(plan: CopyPlan, options: &CopyOptions) -> CopyResult<()> {
         }
     }
 
+    // Clean up empty source directories after moving files
+    if options.move_files {
+        cleanup_empty_directories(&plan.directories);
+    }
+
     if let Some(pb) = overall_pb {
         if matches!(options.progress_bar.style, ProgressBarStyle::Detailed)
             && !options.attributes_only
@@ -275,6 +330,7 @@ fn copy_core(
             return Ok(());
         }
         preserve::apply_preserve_attrs(source, destination, options.preserve)?;
+
         return Ok(());
     }
 
@@ -310,6 +366,7 @@ fn copy_core(
                 preserve::apply_preserve_attrs(source, destination, options.preserve)
                     .map_err(CopyError::from)?;
             }
+
             return Ok(());
         }
         // Continue with normal file copy if this is the first file in the inode group
@@ -335,6 +392,7 @@ fn copy_core(
                         preserve::apply_preserve_attrs(source, destination, options.preserve)
                             .map_err(CopyError::from)?;
                     }
+
                     return Ok(());
                 }
                 Err(e) if reflink_mode == ReflinkMode::Always => {
@@ -362,10 +420,12 @@ fn copy_core(
                 preserve::apply_preserve_attrs(source, destination, options.preserve)
                     .map_err(CopyError::from)?;
             }
+
             return Ok(());
         }
     }
 
+    // Copy file in chunks
     let mut src_file = std::fs::File::open(source)?;
     let dest_file = match std::fs::File::create(destination) {
         Ok(file) => file,
@@ -453,17 +513,26 @@ fn copy_core(
     Ok(())
 }
 
-fn update_progress(
-    overall_pb: Option<&ProgressBar>,
-    completed_files: &AtomicUsize,
-    total_files: usize,
-    options: &CopyOptions,
-) {
-    let completed = completed_files.fetch_add(1, Ordering::Relaxed) + 1;
-    if let Some(pb) = overall_pb
-        && matches!(options.progress_bar.style, ProgressBarStyle::Detailed)
-    {
-        pb.set_message(format!("Copying: {}/{} files", completed, total_files));
+// Clean up empty source directories after moving files.
+fn cleanup_empty_directories(directories: &[crate::utility::preprocess::DirectoryTask]) {
+    let mut dirs_to_clean: Vec<PathBuf> = directories
+        .iter()
+        .filter_map(|task| task.source.clone())
+        .collect();
+
+    dirs_to_clean.sort_by_key(|path| std::cmp::Reverse(path.components().count()));
+
+    for dir in dirs_to_clean {
+        match std::fs::remove_dir(&dir) {
+            Ok(()) => {}
+            Err(e) => {
+                eprintln!(
+                    "Warning: Failed to remove directory '{}': {}",
+                    dir.display(),
+                    e
+                )
+            }
+        }
     }
 }
 
@@ -477,6 +546,7 @@ mod tests {
     fn default_copy_options() -> CopyOptions {
         CopyOptions {
             recursive: false,
+            move_files: false,
             resume: false,
             force: false,
             interactive: false,
@@ -642,5 +712,142 @@ mod tests {
 
         assert!(dest.exists());
         assert_eq!(fs::metadata(&dest).unwrap().len(), 70 * 1024 * 1024);
+    }
+
+    #[test]
+    fn test_move_file_to_different_directory() {
+        let temp_dir = TempDir::new().unwrap();
+        let source_dir = temp_dir.path().join("source_dir");
+        let dest_dir = temp_dir.path().join("dest_dir");
+        let source_file = source_dir.join("file.txt");
+        let dest_file = dest_dir.join("file.txt");
+
+        fs::create_dir(&source_dir).unwrap();
+        fs::create_dir(&dest_dir).unwrap();
+        fs::write(&source_file, b"moved to different directory").unwrap();
+
+        let mut options = default_copy_options();
+        options.move_files = true;
+
+        copy(&source_file, &dest_file, &options).unwrap();
+
+        assert!(dest_file.exists());
+        let content = fs::read_to_string(&dest_file).unwrap();
+        assert_eq!(content, "moved to different directory");
+
+        assert!(!source_file.exists());
+    }
+
+    #[test]
+    fn test_copy_with_move_files() {
+        let temp_dir = TempDir::new().unwrap();
+        let source = temp_dir.path().join("source.txt");
+        let dest = temp_dir.path().join("dest.txt");
+
+        fs::write(&source, b"test content for delete original").unwrap();
+
+        let mut options = default_copy_options();
+        options.move_files = true;
+
+        copy(&source, &dest, &options).unwrap();
+        assert!(dest.exists());
+        let content = fs::read_to_string(&dest).unwrap();
+        assert_eq!(content, "test content for delete original");
+
+        assert!(!source.exists());
+    }
+
+    #[test]
+    fn test_multiple_copy_with_move_files() {
+        let temp_dir = TempDir::new().unwrap();
+        let source1 = temp_dir.path().join("source1.txt");
+        let source2 = temp_dir.path().join("source2.txt");
+        let dest_dir = temp_dir.path().join("dest");
+
+        fs::write(&source1, b"content1").unwrap();
+        fs::write(&source2, b"content2").unwrap();
+        fs::create_dir(&dest_dir).unwrap();
+
+        let sources = vec![source1.clone(), source2.clone()];
+        let mut options = default_copy_options();
+        options.move_files = true;
+
+        multiple_copy(sources, dest_dir.clone(), &options).unwrap();
+
+        assert!(dest_dir.join("source1.txt").exists());
+        assert!(dest_dir.join("source2.txt").exists());
+        assert_eq!(
+            fs::read_to_string(dest_dir.join("source1.txt")).unwrap(),
+            "content1"
+        );
+        assert_eq!(
+            fs::read_to_string(dest_dir.join("source2.txt")).unwrap(),
+            "content2"
+        );
+
+        assert!(!source1.exists());
+        assert!(!source2.exists());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_move_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let temp_dir = TempDir::new().unwrap();
+        let target = temp_dir.path().join("target.txt");
+        let source_link = temp_dir.path().join("source_link");
+        let dest_link = temp_dir.path().join("dest_link");
+
+        fs::write(&target, "symlink target content").unwrap();
+        symlink(&target, &source_link).unwrap();
+
+        let mut options = default_copy_options();
+        options.move_files = true;
+
+        copy(&source_link, &dest_link, &options).unwrap();
+
+        // Destination symlink should exist and point to target
+        // Note: exists() follows symlinks, so use symlink_metadata to check if symlink exists
+        assert!(fs::symlink_metadata(&dest_link).is_ok());
+        assert_eq!(fs::read_link(&dest_link).unwrap(), target);
+
+        // Source symlink should be removed
+        assert!(!source_link.exists());
+
+        // Target file should still exist
+        assert!(target.exists());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_move_hardlink() {
+        use std::fs::hard_link;
+
+        let temp_dir = TempDir::new().unwrap();
+        let source = temp_dir.path().join("source.txt");
+        let hardlink = temp_dir.path().join("hardlink.txt");
+        let dest_dir = temp_dir.path().join("dest");
+        let dest_file = dest_dir.join("source.txt");
+
+        fs::create_dir(&dest_dir).unwrap();
+        fs::write(&source, "hardlink content").unwrap();
+        hard_link(&source, &hardlink).unwrap();
+
+        let mut options = default_copy_options();
+        options.move_files = true;
+
+        copy(&source, &dest_file, &options).unwrap();
+
+        // Destination file should exist with correct content
+        assert!(dest_file.exists());
+        assert_eq!(fs::read_to_string(&dest_file).unwrap(), "hardlink content");
+
+        // Source file should be removed
+        assert!(!source.exists());
+
+        // Original hardlink should still exist and have same inode
+        assert!(hardlink.exists());
+        assert_eq!(fs::read_to_string(&hardlink).unwrap(), "hardlink content");
     }
 }
