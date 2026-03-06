@@ -337,7 +337,7 @@ fn copy_core(
                     }
                     return Ok(());
                 }
-                Err(e) if reflink_mode == ReflinkMode::Always => {
+                Err(_e) if reflink_mode == ReflinkMode::Always => {
                     return Err(CopyError::ReflinkFailed {
                         source: source.to_path_buf(),
                         destination: destination.to_path_buf(),
