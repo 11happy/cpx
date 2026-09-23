@@ -14,14 +14,14 @@ jobs:
     outputs:
       version: ${{ steps.get_version.outputs.version }}
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
       - name: Get version from tag
         id: get_version
         run: echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
 
       - name: Create Release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
           name: cpx v${{ steps.get_version.outputs.version }}
           generate_release_notes: true
@@ -30,6 +30,8 @@ jobs:
     needs: create-release
     runs-on: ${{ matrix.os }}
     strategy:
+      # One target failing must not cancel the others' uploads.
+      fail-fast: false
       matrix:
         include:
           - os: ubuntu-latest
@@ -48,36 +50,58 @@ jobs:
             target: armv7-unknown-linux-gnueabihf
             artifact_name: cpx
             asset_name: cpx-linux-armv7
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-musl
+            artifact_name: cpx
+            asset_name: cpx-linux-aarch64-musl
+          - os: ubuntu-latest
+            target: armv7-unknown-linux-musleabihf
+            artifact_name: cpx
+            asset_name: cpx-linux-armv7-musl
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            artifact_name: cpx
+            asset_name: cpx-macos-x86_64
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            artifact_name: cpx
+            asset_name: cpx-macos-aarch64
 
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
       - name: Install Rust
-        uses: actions-rs/toolchain@v1
+        uses: dtolnay/rust-toolchain@stable
         with:
-          profile: minimal
-          toolchain: stable
-          target: ${{ matrix.target }}
-          override: true
+          targets: ${{ matrix.target }}
 
-      - name: Install cross
-        run: cargo install cross --git https://github.com/cross-rs/cross
+      - name: Install cross (prebuilt)
+        if: runner.os == 'Linux'
+        uses: taiki-e/install-action@cross
 
-      - name: Build
+      - name: Build (Linux, via cross)
+        if: runner.os == 'Linux'
         run: cross build --release --target ${{ matrix.target }}
 
+      - name: Build (macOS)
+        if: runner.os == 'macOS'
+        run: cargo build --release --target ${{ matrix.target }}
+
       - name: Install strip tools
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update -q
           sudo apt-get install -y binutils-arm-linux-gnueabihf binutils-aarch64-linux-gnu
 
       - name: Strip binary
         run: |
-          if [[ "${{ matrix.target }}" == *"musl"* ]]; then
+          if [[ "${{ runner.os }}" == "macOS" ]]; then
             strip target/${{ matrix.target }}/release/${{ matrix.artifact_name }} || true
-          elif [[ "${{ matrix.target }}" == "armv7-unknown-linux-gnueabihf" ]]; then
+          elif [[ "${{ matrix.target }}" == *"musl"* ]]; then
+            strip target/${{ matrix.target }}/release/${{ matrix.artifact_name }} || true
+          elif [[ "${{ matrix.target }}" == armv7-* ]]; then
             arm-linux-gnueabihf-strip target/${{ matrix.target }}/release/${{ matrix.artifact_name }} || true
-          elif [[ "${{ matrix.target }}" == "aarch64-unknown-linux-gnu" ]]; then
+          elif [[ "${{ matrix.target }}" == aarch64-unknown-linux-* ]]; then
             aarch64-linux-gnu-strip target/${{ matrix.target }}/release/${{ matrix.artifact_name }} || true
           else
             strip target/${{ matrix.target }}/release/${{ matrix.artifact_name }}
@@ -91,6 +115,6 @@ jobs:
           mv target/${{ matrix.target }}/release/${{ matrix.asset_name }}.tar.gz .
 
       - name: Upload Release Asset
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
           files: ./${{ matrix.asset_name }}.tar.gz

@@ -29,6 +29,8 @@ Copying 51% ██████████████████████�
 - 📊 Beautiful progress bars (customizable)
 - ⏸️ Resume interrupted transfers
 - 🎯 Exclude patterns (gitignore-style)
+- 🕳️ Sparse files stay sparse, reflink/CoW copies where supported
+- 🧪 Tested against the GNU coreutils `cp` test suite
 - ⚙️ Flexible configuration
 - 🛑 Graceful Ctrl+C handling with resume hints
 
@@ -37,7 +39,7 @@ Copying 51% ██████████████████████�
 
 ### Prerequisites
 
-- **Linux** (kernel 4.5+ recommended for fast copy)
+- **Linux** (kernel 4.5+ recommended for fast copy) or **macOS**
 - **Rust** 1.70 or later
 
 
@@ -117,10 +119,11 @@ cpx -r -p=all photos/ /backup/photos/
 ## Key Options
 ```
 cpx [OPTIONS] <SOURCE>... <DESTINATION>
+cpx [OPTIONS] -t <DIRECTORY> <SOURCE>...
 
 Arguments:
   <SOURCE>...       Source file(s) or directory(ies)
-  <DESTINATION>     Destination file or directory
+  <DESTINATION>     Destination file or directory (omitted with -t)
 
 Input/Output Options:
   -t, --target-directory <DIRECTORY>
@@ -128,8 +131,12 @@ Input/Output Options:
   -e, --exclude <PATTERN>  Exclude files matching pattern (supports globs, comma-separated)
 
 Copy Behavior:
-  -r, --recursive          Copy directories recursively
+  -r, -R, --recursive      Copy directories recursively
+  -a, --archive            Same as -r --no-dereference --preserve=all
   -j <N>                   Number of parallel operations [default: 4]
+  -v, --verbose            Print each 'src' -> 'dst' as it is copied
+  -u, --update             Copy only when SOURCE is newer than DEST or DEST is missing
+  -n, --no-clobber         Never overwrite an existing file
       --resume             Resume interrupted transfers (checksum verified)
   -f, --force              Remove and retry if destination cannot be opened
   -i, --interactive        Prompt before overwrite
@@ -138,7 +145,7 @@ Copy Behavior:
       --remove-destination Remove destination file before copying
 
 Link and Symlink Options:
-  -s, --symbolic-link [MODE]
+  -s, --symbolic-link[=MODE]
                            Create symlinks instead of copying [auto|absolute|relative]
   -l, --link               Create hard links instead of copying
   -P, --no-dereference     Never follow symbolic links in SOURCE
@@ -147,12 +154,12 @@ Link and Symlink Options:
                            Follow symbolic links only on command line
 
 Preservation:
-  -p, --preserve [ATTRS]   Preserve attributes [default|all|mode,timestamps,ownership,...]
+  -p, --preserve[=ATTRS]   Preserve attributes [default|all|mode,timestamps,ownership,...]
                            Available: mode, ownership, timestamps, links, context, xattr
 
 Backup and Reflink:
-  -b, --backup [MODE]      Backup existing files [none|simple|numbered|existing]
-      --reflink [WHEN]     CoW copy if supported [auto|always|never]
+  -b, --backup[=MODE]      Backup existing files [none|simple|numbered|existing]
+      --reflink[=WHEN]     CoW copy if supported [auto|always|never]
 
 Configuration:
       --config <PATH>      Use custom config file
@@ -210,27 +217,35 @@ mode = "auto"
 
 ## Performance
 
-`cpx` is built for speed. Quick comparison:
+`cpx` is built for speed. Measured on v0.2.0 (24-core Linux box, tmpfs, warm
+cache, 5 hyperfine runs; `cp` and `cpx -j4` are the defaults, `-j16` is what
+the [benchmarks](docs/benchmarks.md) use):
 
-| Task | cp | cpx -j16 | speedup |
-|------|-----|-------|-----|
-| VsCode (~15k files) | 1084ms | 263ms | 4.12x |
-| rust (~65k files) | 4.553s | 1.091s  |  4.17x |
+| Tree | files | cp | cpx -j4 | cpx -j16 | xcp -w16 | cpz |
+|------|-------|----|---------|----------|----------|-----|
+| rust-lang/rust | 63k | 415 ms | 227 ms | **141 ms** | 193 ms | 61 ms |
+| torvalds/linux (2.1 GB) | 96k | 962 ms | 430 ms | **240 ms** | 348 ms | 180 ms |
+| 200k small files | 200k | 942 ms | 520 ms | **262 ms** | 380 ms | n/a |
 
-**See [benchmarks.md](docs/benchmarks.md) for detailed methodology and more comparisons.**
+v0.1.4 had a quadratic planning step: the rust tree took **78 s**, the linux
+tree **154 s**, and the 200k-file tree did not finish in ten minutes. Upgrade
+if you copy large trees.
+
+**See [benchmarks.md](docs/benchmarks.md) for methodology and more comparisons.**
 
 ## Documentation
 
 - **[Configuration Guide](docs/configuration.md)** - Complete config reference
 - **[Benchmarks](docs/benchmarks.md)** - Performance analysis and comparisons
+- **[GNU cp compatibility](docs/gnu-compat.md)** - The ported coreutils test suite and the known differences
 - **[Contributing](CONTRIBUTING.md)** - How to contribute
 
 ## Platform Support
 
 | Platform | Status | Notes |
 |----------|--------|-------|
-| **Linux** | ✅ Supported | Fast copy supported for (kernel 4.5+) |
-| macOS | 🔄 Planned | To be released |
+| **Linux** | ✅ Supported | copy_file_range fast path (kernel 4.5+), hole-preserving sparse copies |
+| **macOS** | ✅ Supported | built and tested in CI, binaries on the releases page |
 | Windows | 🔄 Planned | To be released |
 
 ## Quick Start for Developers

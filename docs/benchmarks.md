@@ -1,5 +1,54 @@
 # CPX Performance Benchmarks
 
+## v0.2.0 (September 2026)
+
+Measured with [hyperfine](https://github.com/sharkdp/hyperfine) (`-N`, 1 warmup, 5 runs,
+destination removed before each run) on a 24-core Linux machine, source and
+destination on tmpfs, warm cache. `xcp` 0.24 and `cpz` (fuc) from crates.io
+for comparison. Times are the mean.
+
+| Tree | files | size | cp -r | cpx -j4 | cpx -j16 | xcp -r -w16 | cpz |
+|------|-------|------|-------|---------|----------|-------------|-----|
+| rust-lang/rust (depth 1) | 63,115 | 465 MB | 415 ms | 227 ms | **141 ms** | 193 ms | 61 ms |
+| torvalds/linux (depth 1) | 95,966 | 2.1 GB | 962 ms | 430 ms | **240 ms** | 348 ms | 180 ms |
+| synthetic, 200k files of 0-4 KiB | 200,000 | 400 MB | 942 ms | 520 ms | **262 ms** | 380 ms | n/a |
+
+### Why v0.1.4 users should upgrade
+
+v0.1.4 checked every planned file against all previously planned files, so
+planning was O(n²) in the number of files:
+
+| files | v0.1.4 | v0.2.0 (-j4) |
+|-------|--------|--------------|
+| 10,000 | 1.4 s | 47 ms |
+| 20,000 | 5.0 s | 90 ms |
+| 40,000 | 21.5 s | 158 ms |
+| rust tree (63k) | 78 s | 227 ms |
+| linux tree (96k) | 154 s | 430 ms |
+| 200k files | > 10 min (killed) | 520 ms |
+
+### What changed in v0.2.0
+
+- Planning is linear: duplicate destinations across sources are found with one
+  sort instead of a scan per file, and per-entry `stat` plus exclude matching run
+  on the directory walker's thread pool (excluded directories are pruned, not
+  walked).
+- Files are copied largest-first by whichever worker is free (a shared counter),
+  instead of rayon's static chunking, which used to hand one worker a contiguous
+  run of the largest files while the others idled: linux tree 439 ms -> 243 ms.
+- One `copy_file_range` per regular file (the previous loop made a second call
+  just to observe EOF).
+
+### Where the remaining gap to cpz is
+
+`cpz` walks and copies in one pass with one task per directory and no progress
+accounting. cpx still plans the whole tree first (about 60 ms of the 240 ms on
+the linux tree), keeps a byte-accurate progress bar and total, and stats every
+entry for its size. Those are the costs of resume, exclude rules and progress.
+
+---
+
+## v0.1.x results
 
 ## Methodology
 

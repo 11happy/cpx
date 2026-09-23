@@ -8,7 +8,11 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
 
     steps:
       - name: Checkout code
@@ -16,6 +20,8 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
 
       - name: Cache dependencies
         uses: Swatinem/rust-cache@v2
@@ -27,7 +33,15 @@ jobs:
         run: cargo test --verbose
 
       - name: Lint with Clippy
-        run: cargo clippy -- -D warnings
+        run: cargo clippy --all-targets -- -D warnings
 
       - name: Check formatting
         run: cargo fmt -- --check
+
+      - name: Build release binary for the GNU suite
+        if: runner.os == 'Linux'
+        run: cargo build --release
+
+      - name: Run ported GNU coreutils cp tests
+        if: runner.os == 'Linux'
+        run: PATH="$PWD/target/release:$PATH" tests/gnu/run.sh
