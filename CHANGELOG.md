@@ -41,7 +41,9 @@
   files that report size 0 are copied with their content; `cpx -r dir/. dest`
   copies the contents; declining an `-i` prompt exits 1.
 - `preserve = "none"` / `"default"` in the config were not recognised.
-- Builds on macOS (#1); macOS binaries are part of the release.
+- Builds on macOS (#1) and macOS binaries are part of the release; the unit
+  and integration tests pass in CI there, but cpx has not been functionally
+  tested on real macOS hardware yet.
 - Integration tests no longer pick up the developer's own config (#14) and no
   longer race on the process working directory.
 
