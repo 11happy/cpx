@@ -194,6 +194,7 @@ fn execute_copy(mut plan: CopyPlan, options: &CopyOptions) -> CopyResult<()> {
                 &file_task.destination,
                 file_task.size,
                 file_task.mode,
+                file_task.sparse,
                 multi.as_ref(),
                 overall_pb.as_deref(),
                 &completed_files,
@@ -232,6 +233,7 @@ fn execute_copy(mut plan: CopyPlan, options: &CopyOptions) -> CopyResult<()> {
                     &file_task.destination,
                     file_task.size,
                     file_task.mode,
+                    file_task.sparse,
                     multi.as_ref(),
                     overall_pb.as_deref(),
                     &completed_files,
@@ -318,6 +320,7 @@ fn copy_core(
     destination: &Path,
     file_size: u64,
     file_mode: u32,
+    maybe_sparse: bool,
     multi: Option<&MultiProgress>,
     overall_pb: Option<&ProgressBar>,
     completed_files: &AtomicUsize,
@@ -336,7 +339,10 @@ fn copy_core(
     // Refuse to copy a file onto itself (also via a symlink or hard link to
     // it): the destination would be truncated before it is read. GNU cp
     // allows it only with --force --backup, where the backup becomes the source.
-    let mut is_same_file = same_file(source, destination);
+    // One lstat of the destination answers the common case (absent) and
+    // feeds the same-file and dangling-symlink checks below.
+    let dest_lmeta = std::fs::symlink_metadata(destination).ok();
+    let mut is_same_file = dest_lmeta.is_some() && same_file(source, destination);
     if is_same_file && options.remove_destination && !same_dir_entry(source, destination) {
         // A symlink or hard link to the source can be removed without
         // touching the source; the source's own directory entry cannot.
@@ -394,7 +400,7 @@ fn copy_core(
 
     if options.remove_destination {
         let _ = std::fs::remove_file(destination);
-    } else if destination.is_symlink()
+    } else if dest_lmeta.as_ref().is_some_and(|m| m.is_symlink())
         && let Err(e) = std::fs::metadata(destination)
     {
         if options.force && e.raw_os_error() == Some(libc::ELOOP) {
@@ -476,6 +482,7 @@ fn copy_core(
             destination,
             file_size,
             create_mode,
+            maybe_sparse,
             overall_pb,
             file_pb.as_ref(),
             options,

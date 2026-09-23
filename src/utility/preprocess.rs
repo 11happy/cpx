@@ -24,6 +24,9 @@ pub struct FileTask {
     /// Source permission bits; the destination is created with them so a
     /// new file gets `mode & !umask` like GNU cp, even without --preserve.
     pub mode: u32,
+    /// st_blocks says the file may have holes; only then is the SEEK_HOLE
+    /// probe paid for at copy time.
+    pub sparse: bool,
     /// (device, inode) of the source when --preserve=links is on, so files
     /// that are hard links of each other can be re-linked in the copy.
     pub inode_group: Option<(u64, u64)>,
@@ -98,7 +101,7 @@ impl CopyPlan {
     }
 
     pub fn add_file(&mut self, source: PathBuf, destination: PathBuf, size: u64) {
-        self.add_file_with_inode(source, destination, size, 0o666, None);
+        self.add_file_with_inode(source, destination, size, 0o666, false, None);
     }
 
     /// Register `dest/a`, `dest/a/b`, ... for `--parents`, each paired with
@@ -161,6 +164,7 @@ impl CopyPlan {
         destination: PathBuf,
         size: u64,
         mode: u32,
+        sparse: bool,
         inode_group: Option<(u64, u64)>,
     ) {
         self.files.push(FileTask {
@@ -168,6 +172,7 @@ impl CopyPlan {
             destination,
             size,
             mode,
+            sparse,
             inode_group,
         });
         self.total_size += size;
@@ -399,17 +404,21 @@ fn process_entry(
         // GNU cp -n silently leaves existing destinations alone.
     } else {
         #[cfg(unix)]
-        let mode = {
-            use std::os::unix::fs::PermissionsExt;
-            metadata.permissions().mode() & 0o7777
+        let (mode, sparse) = {
+            use std::os::unix::fs::{MetadataExt, PermissionsExt};
+            (
+                metadata.permissions().mode() & 0o7777,
+                metadata.blocks() * 512 < metadata.len(),
+            )
         };
         #[cfg(not(unix))]
-        let mode = 0o666;
+        let (mode, sparse) = (0o666, false);
         plan.add_file_with_inode(
             source.to_path_buf(),
             dest_path,
             metadata.len(),
             mode,
+            sparse,
             inode_group,
         );
     }

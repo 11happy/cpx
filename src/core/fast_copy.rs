@@ -16,11 +16,13 @@ pub enum FastCopy {
     Fallback(std::fs::File, std::fs::File),
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn fast_copy(
     source: &Path,
     destination: &Path,
     file_size: u64,
     file_mode: u32,
+    maybe_sparse: bool,
     overall_pb: Option<&ProgressBar>,
     file_pb: Option<&ProgressBar>,
     options: &CopyOptions,
@@ -61,8 +63,11 @@ pub fn fast_copy(
     const MIN_CHUNK: usize = 4 * 1024 * 1024;
     let chunk_size = std::cmp::max(MIN_CHUNK, (file_size / TARGET_UPDATES) as usize);
 
-    let dest_is_regular = dest_file.metadata().map(|m| m.is_file()).unwrap_or(false);
-    if file_size > 0 && dest_is_regular && is_sparse(&src_file, file_size) {
+    if maybe_sparse
+        && file_size > 0
+        && dest_file.metadata().map(|m| m.is_file()).unwrap_or(false)
+        && is_sparse(&src_file, file_size)
+    {
         return match copy_sparse(
             &src_file, &dest_file, file_size, chunk_size, overall_pb, file_pb, options,
         )? {

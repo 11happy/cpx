@@ -118,14 +118,6 @@ pub fn apply_preserve_attrs(
         })?;
     }
 
-    if attrs.timestamps {
-        preserve_timestamps(destination, &src_metadata).map_err(|_e| {
-            PreserveError::FailedToPreserve {
-                path: destination.to_path_buf(),
-                attribute: "timestamps".to_string(),
-            }
-        })?;
-    }
     #[cfg(unix)]
     if attrs.mode {
         preserve_mode(destination, &src_metadata).map_err(|_e| {
@@ -137,7 +129,7 @@ pub fn apply_preserve_attrs(
         // GNU cp treats POSIX ACLs as part of the mode; --preserve=xattr
         // already copies them along with everything else.
         if !attrs.xattr {
-            preserve_acl(source, destination);
+            preserve_acl(source, destination, src_metadata.is_dir());
         }
     }
 
@@ -215,11 +207,17 @@ fn preserve_ownership(destination: &Path, src_metadata: &std::fs::Metadata) -> i
 }
 
 #[cfg(unix)]
-fn preserve_acl(source: &Path, destination: &Path) {
+fn preserve_acl(source: &Path, destination: &Path, is_dir: bool) {
     if !xattr::SUPPORTED_PLATFORM {
         return;
     }
-    for name in ["system.posix_acl_access", "system.posix_acl_default"] {
+    // Default ACLs only exist on directories; regular files pay one probe.
+    let names: &[&str] = if is_dir {
+        &["system.posix_acl_access", "system.posix_acl_default"]
+    } else {
+        &["system.posix_acl_access"]
+    };
+    for name in names {
         if let Ok(Some(value)) = xattr::get(source, name) {
             let _ = xattr::set(destination, name, &value);
         }
