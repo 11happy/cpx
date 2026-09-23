@@ -507,6 +507,7 @@ fn copy_core(
     #[cfg(not(target_os = "linux"))]
     let (mut src_file, dest_file) = {
         use crate::utility::helper::create_with_mode;
+        let _ = maybe_sparse; // only the Linux fast path can preserve holes
         let src_file = std::fs::File::open(source)?;
         let dest_file = match create_with_mode(destination, create_mode) {
             Ok(file) => file,
