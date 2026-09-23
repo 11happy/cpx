@@ -192,6 +192,17 @@ fn calculate_checksum(path: &Path) -> io::Result<u64> {
     Ok(hasher.digest())
 }
 
+/// `-u/--update`: the destination exists and is at least as new as the source.
+fn dest_is_up_to_date(destination: &Path, src_metadata: &Metadata) -> bool {
+    match (
+        std::fs::metadata(destination).and_then(|m| m.modified()),
+        src_metadata.modified(),
+    ) {
+        (Ok(dest_modified), Ok(src_modified)) => src_modified <= dest_modified,
+        _ => false,
+    }
+}
+
 pub fn should_skip_file(source: &Path, destination: &Path) -> io::Result<bool> {
     let dest_metadata = match std::fs::metadata(destination) {
         Ok(meta) => meta,
@@ -282,6 +293,10 @@ fn process_entry(
         plan.add_symlink(source.to_path_buf(), dest_path, kind);
     } else if options.resume && should_skip_file(source, &dest_path)? {
         plan.mark_skipped(metadata.len());
+    } else if options.update && dest_is_up_to_date(&dest_path, metadata) {
+        // GNU cp -u silently leaves up-to-date destinations alone.
+    } else if options.no_clobber && dest_path.symlink_metadata().is_ok() {
+        // GNU cp -n silently leaves existing destinations alone.
     } else {
         plan.add_file_with_inode(source.to_path_buf(), dest_path, metadata.len(), inode_group);
     }

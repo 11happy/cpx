@@ -4,14 +4,14 @@ use crate::core::fast_copy::fast_copy;
 use crate::error::{CopyError, CopyResult};
 use crate::utility::backup::{create_backup, generate_backup_path};
 use crate::utility::helper::{
-    create_directories, create_hardlink, create_symlink, prompt_overwrite,
+    create_directories, create_hardlink, create_symlink, prompt_overwrite, truncate_filename,
 };
 use crate::utility::preprocess::{
     CopyPlan, preprocess_directory, preprocess_file, preprocess_multiple,
 };
 use crate::utility::preserve::{self, HardLinkTracker, PreserveAttr};
 use crate::utility::progress_bar::ProgressBarStyle;
-use indicatif::ProgressBar;
+use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use rayon::prelude::*;
 use std::io::{self, Read, Write};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -91,9 +91,29 @@ pub fn multiple_copy(
     execute_copy(plan, options)
 }
 
+/// Files at least this large get their own progress bar under the overall one.
+const PER_FILE_BAR_MIN: u64 = 64 * 1024 * 1024;
+
+/// `-v`: print one `'src' -> 'dst'` line, routed through the progress
+/// display when one is active so the bar is not garbled.
+fn log_verbose(multi: Option<&MultiProgress>, source: &Path, destination: &Path) {
+    let line = format!("'{}' -> '{}'", source.display(), destination.display());
+    match multi {
+        Some(m) => m.suspend(|| println!("{}", line)),
+        None => println!("{}", line),
+    }
+}
+
 fn execute_copy(plan: CopyPlan, options: &CopyOptions) -> CopyResult<()> {
     if !options.attributes_only {
         create_directories(&plan.directories)?;
+        if options.verbose {
+            for dir_task in &plan.directories {
+                if let Some(src) = &dir_task.source {
+                    log_verbose(None, src, &dir_task.destination);
+                }
+            }
+        }
     } else {
         for dir_task in &plan.directories {
             if let Some(src) = &dir_task.source
@@ -112,6 +132,9 @@ fn execute_copy(plan: CopyPlan, options: &CopyOptions) -> CopyResult<()> {
     if options.hard_link {
         for hardlink_task in &plan.hardlinks {
             create_hardlink(hardlink_task, options)?;
+            if options.verbose {
+                log_verbose(None, &hardlink_task.source, &hardlink_task.destination);
+            }
         }
 
         if plan.total_hardlinks > 0 {
@@ -126,6 +149,9 @@ fn execute_copy(plan: CopyPlan, options: &CopyOptions) -> CopyResult<()> {
                 source: symlink_task.source.clone(),
                 destination: symlink_task.destination.clone(),
             })?;
+            if options.verbose {
+                log_verbose(None, &symlink_task.source, &symlink_task.destination);
+            }
         }
         if plan.total_symlinks > 0 {
             println!("Created {} symbolic links", plan.total_symlinks);
@@ -136,13 +162,15 @@ fn execute_copy(plan: CopyPlan, options: &CopyOptions) -> CopyResult<()> {
         }
     }
 
-    let overall_pb = if plan.total_files >= 1 && !options.interactive && !options.attributes_only {
-        let pb = ProgressBar::new(plan.total_size);
-        options.progress_bar.apply(&pb, plan.total_files);
-        Some(Arc::new(pb))
-    } else {
-        None
-    };
+    let (multi, overall_pb) =
+        if plan.total_files >= 1 && !options.interactive && !options.attributes_only {
+            let multi = MultiProgress::new();
+            let pb = multi.add(ProgressBar::new(plan.total_size));
+            options.progress_bar.apply(&pb, plan.total_files);
+            (Some(multi), Some(Arc::new(pb)))
+        } else {
+            (None, None)
+        };
 
     let completed_files = Arc::new(AtomicUsize::new(0));
 
@@ -160,6 +188,7 @@ fn execute_copy(plan: CopyPlan, options: &CopyOptions) -> CopyResult<()> {
                 &file_task.source,
                 &file_task.destination,
                 file_task.size,
+                multi.as_ref(),
                 overall_pb.as_deref(),
                 &completed_files,
                 plan.total_files,
@@ -185,6 +214,7 @@ fn execute_copy(plan: CopyPlan, options: &CopyOptions) -> CopyResult<()> {
                         &file_task.source,
                         &file_task.destination,
                         file_task.size,
+                        multi.as_ref(),
                         overall_pb.as_deref(),
                         &completed_files,
                         plan.total_files,
@@ -264,6 +294,7 @@ fn copy_core(
     source: &Path,
     destination: &Path,
     file_size: u64,
+    multi: Option<&MultiProgress>,
     overall_pb: Option<&ProgressBar>,
     completed_files: &AtomicUsize,
     total_files: usize,
@@ -305,7 +336,15 @@ fn copy_core(
 
         if tracker_guard.track_and_create_link(source, destination)? {
             // Hard link was created, no need to copy file content
-            update_progress(overall_pb, completed_files, total_files, options);
+            update_progress(
+                source,
+                destination,
+                multi,
+                overall_pb,
+                completed_files,
+                total_files,
+                options,
+            );
             if options.preserve != PreserveAttr::none() {
                 preserve::apply_preserve_attrs(source, destination, options.preserve)
                     .map_err(CopyError::from)?;
@@ -330,7 +369,15 @@ fn copy_core(
                     if let Some(pb) = overall_pb {
                         pb.inc(file_size);
                     }
-                    update_progress(overall_pb, completed_files, total_files, options);
+                    update_progress(
+                        source,
+                        destination,
+                        multi,
+                        overall_pb,
+                        completed_files,
+                        total_files,
+                        options,
+                    );
                     if options.preserve != PreserveAttr::none() {
                         preserve::apply_preserve_attrs(source, destination, options.preserve)
                             .map_err(CopyError::from)?;
@@ -348,6 +395,11 @@ fn copy_core(
         }
     }
 
+    let file_pb = match multi {
+        Some(m) if file_size >= PER_FILE_BAR_MIN => Some(m.add(new_file_bar(source, file_size))),
+        _ => None,
+    };
+
     #[cfg(target_os = "linux")]
     {
         if options.abort.load(Ordering::Relaxed) {
@@ -356,8 +408,24 @@ fn copy_core(
                 "Operation aborted by user",
             )));
         }
-        if let Ok(true) = fast_copy(source, destination, file_size, overall_pb, options) {
-            update_progress(overall_pb, completed_files, total_files, options);
+        if let Ok(true) = fast_copy(
+            source,
+            destination,
+            file_size,
+            overall_pb,
+            file_pb.as_ref(),
+            options,
+        ) {
+            finish_file_bar(multi, file_pb);
+            update_progress(
+                source,
+                destination,
+                multi,
+                overall_pb,
+                completed_files,
+                total_files,
+                options,
+            );
             if options.preserve != PreserveAttr::none() {
                 preserve::apply_preserve_attrs(source, destination, options.preserve)
                     .map_err(CopyError::from)?;
@@ -431,19 +499,34 @@ fn copy_core(
             if let Some(pb) = overall_pb {
                 pb.inc(accumulated_bytes);
             }
+            if let Some(pb) = &file_pb {
+                pb.inc(accumulated_bytes);
+            }
             accumulated_bytes = 0;
         }
     }
 
-    if accumulated_bytes > 0
-        && let Some(pb) = overall_pb
-    {
-        pb.inc(accumulated_bytes);
+    if accumulated_bytes > 0 {
+        if let Some(pb) = overall_pb {
+            pb.inc(accumulated_bytes);
+        }
+        if let Some(pb) = &file_pb {
+            pb.inc(accumulated_bytes);
+        }
     }
 
     dest_file.flush()?;
+    finish_file_bar(multi, file_pb);
 
-    update_progress(overall_pb, completed_files, total_files, options);
+    update_progress(
+        source,
+        destination,
+        multi,
+        overall_pb,
+        completed_files,
+        total_files,
+        options,
+    );
 
     if options.preserve != PreserveAttr::none() {
         preserve::apply_preserve_attrs(source, destination, options.preserve)
@@ -453,12 +536,43 @@ fn copy_core(
     Ok(())
 }
 
+fn new_file_bar(source: &Path, file_size: u64) -> ProgressBar {
+    let name = source
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let pb = ProgressBar::new(file_size);
+    pb.set_style(
+        ProgressStyle::default_bar()
+            .template(
+                "  {msg:<32} {bar:20} {binary_bytes}/{binary_total_bytes} {binary_bytes_per_sec}",
+            )
+            .unwrap(),
+    );
+    pb.set_message(truncate_filename(&name, 32));
+    pb
+}
+
+fn finish_file_bar(multi: Option<&MultiProgress>, file_pb: Option<ProgressBar>) {
+    if let (Some(m), Some(pb)) = (multi, file_pb) {
+        pb.finish_and_clear();
+        m.remove(&pb);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn update_progress(
+    source: &Path,
+    destination: &Path,
+    multi: Option<&MultiProgress>,
     overall_pb: Option<&ProgressBar>,
     completed_files: &AtomicUsize,
     total_files: usize,
     options: &CopyOptions,
 ) {
+    if options.verbose {
+        log_verbose(multi, source, destination);
+    }
     let completed = completed_files.fetch_add(1, Ordering::Relaxed) + 1;
     if let Some(pb) = overall_pb
         && matches!(options.progress_bar.style, ProgressBarStyle::Detailed)
@@ -478,6 +592,9 @@ mod tests {
         CopyOptions {
             recursive: false,
             resume: false,
+            verbose: false,
+            update: false,
+            no_clobber: false,
             force: false,
             interactive: false,
             preserve: PreserveAttr::none(),

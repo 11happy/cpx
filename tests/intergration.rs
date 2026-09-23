@@ -115,6 +115,74 @@ fn test_target_directory_with_single_source() {
 }
 
 #[test]
+fn test_verbose_prints_each_copied_file() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let source_dir = temp.child("src");
+    let dest_dir = temp.child("dest");
+    source_dir.create_dir_all().unwrap();
+    source_dir.child("a.txt").write_str("a").unwrap();
+    source_dir.child("b.txt").write_str("b").unwrap();
+
+    cpx()
+        .arg("-rv")
+        .arg(source_dir.path())
+        .arg(dest_dir.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(format!(
+            "'{}' -> '{}'",
+            source_dir.child("a.txt").path().display(),
+            dest_dir.child("src/a.txt").path().display()
+        )))
+        .stdout(predicate::str::contains("b.txt"));
+}
+
+#[test]
+fn test_update_skips_newer_destination() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let source = temp.child("source.txt");
+    let dest = temp.child("dest.txt");
+    source.write_str("new").unwrap();
+    dest.write_str("old").unwrap();
+
+    // destination is newer than the source -> left alone
+    let old = filetime::FileTime::from_unix_time(1_000_000_000, 0);
+    filetime::set_file_mtime(source.path(), old).unwrap();
+    cpx()
+        .arg("-u")
+        .arg(source.path())
+        .arg(dest.path())
+        .assert()
+        .success();
+    dest.assert("old");
+
+    // source is newer than the destination -> copied
+    filetime::set_file_mtime(dest.path(), old).unwrap();
+    filetime::set_file_mtime(
+        source.path(),
+        filetime::FileTime::from_unix_time(1_500_000_000, 0),
+    )
+    .unwrap();
+    cpx()
+        .arg("-u")
+        .arg(source.path())
+        .arg(dest.path())
+        .assert()
+        .success();
+    dest.assert("new");
+
+    // missing destination -> copied
+    let dest2 = temp.child("dest2.txt");
+    cpx()
+        .arg("-u")
+        .arg(source.path())
+        .arg(dest2.path())
+        .assert()
+        .success();
+    dest2.assert("new");
+}
+
+#[test]
 fn test_copy_directory_without_recursive_flag() {
     let temp = assert_fs::TempDir::new().unwrap();
     let source_dir = temp.child("source");

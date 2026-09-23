@@ -105,6 +105,26 @@ pub struct CopyArgs {
     #[arg(long = "resume", help = "resume interrupted transfers")]
     pub resume: bool,
 
+    #[arg(short = 'v', long, help = "explain what is being done")]
+    pub verbose: bool,
+
+    #[arg(short = 'a', long, help = "same as -r --no-dereference --preserve=all")]
+    pub archive: bool,
+
+    #[arg(
+        short = 'n',
+        long = "no-clobber",
+        help = "do not overwrite an existing file"
+    )]
+    pub no_clobber: bool,
+
+    #[arg(
+        short = 'u',
+        long,
+        help = "copy only when the SOURCE file is newer than the destination file or when the destination file is missing"
+    )]
+    pub update: bool,
+
     #[arg(
         short = 'f',
         long,
@@ -212,6 +232,9 @@ pub struct CopyOptions {
     pub recursive: bool,
     pub parallel: usize,
     pub resume: bool,
+    pub verbose: bool,
+    pub update: bool,
+    pub no_clobber: bool,
     pub force: bool,
     pub interactive: bool,
     pub parents: bool,
@@ -234,6 +257,9 @@ impl CopyOptions {
             recursive: false,
             parallel: 4,
             resume: false,
+            verbose: false,
+            update: false,
+            no_clobber: false,
             force: false,
             interactive: false,
             parents: false,
@@ -256,6 +282,9 @@ impl CopyOptions {
             recursive: config.copy.recursive,
             parallel: config.copy.parallel,
             resume: config.copy.resume,
+            verbose: false,
+            update: false,
+            no_clobber: false,
             force: config.copy.force,
             interactive: config.copy.interactive,
             parents: config.copy.parents,
@@ -281,6 +310,9 @@ impl From<&CopyArgs> for CopyOptions {
             recursive: cli.recursive,
             parallel: cli.parallel,
             resume: cli.resume,
+            verbose: cli.verbose,
+            update: cli.update,
+            no_clobber: cli.no_clobber,
             force: cli.force,
             interactive: cli.interactive,
             parents: cli.parents,
@@ -406,6 +438,19 @@ fn apply_cli_overrides(options: &mut CopyOptions, copy_args: &CopyArgs) -> Resul
     if copy_args.resume {
         options.resume = true;
     }
+    if copy_args.verbose {
+        options.verbose = true;
+    }
+    if copy_args.update {
+        options.update = true;
+    }
+    if copy_args.no_clobber {
+        options.no_clobber = true;
+    }
+    if copy_args.archive {
+        options.recursive = true;
+        options.preserve = PreserveAttr::all();
+    }
     if copy_args.parents {
         options.parents = true;
     }
@@ -437,6 +482,9 @@ fn apply_cli_overrides(options: &mut CopyOptions, copy_args: &CopyArgs) -> Resul
     options.parallel = copy_args.parallel;
 
     options.follow_symlink = copy_args.follow_symlink_mode()?;
+    if copy_args.archive && !copy_args.dereference && !copy_args.dereference_command_line {
+        options.follow_symlink = FollowSymlink::NoDereference;
+    }
 
     Ok(())
 }
@@ -532,6 +580,10 @@ mod tests {
                 recursive: false,
                 parallel: 4,
                 resume: false,
+                verbose: false,
+                archive: false,
+                no_clobber: false,
+                update: false,
                 force: false,
                 interactive: false,
                 parents: false,
@@ -565,6 +617,10 @@ mod tests {
                 recursive: false,
                 parallel: 4,
                 resume: true,
+                verbose: false,
+                archive: false,
+                no_clobber: false,
+                update: false,
                 force: false,
                 interactive: false,
                 parents: false,
@@ -598,6 +654,10 @@ mod tests {
                 recursive: false,
                 parallel: 4,
                 resume: true,
+                verbose: false,
+                archive: false,
+                no_clobber: false,
+                update: false,
                 force: false,
                 interactive: false,
                 parents: false,
@@ -631,6 +691,10 @@ mod tests {
                 recursive: false,
                 parallel: 4,
                 resume: false,
+                verbose: false,
+                archive: false,
+                no_clobber: false,
+                update: false,
                 force: false,
                 interactive: false,
                 parents: false,

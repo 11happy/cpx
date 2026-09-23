@@ -11,6 +11,7 @@ pub fn fast_copy(
     destination: &Path,
     file_size: u64,
     overall_pb: Option<&ProgressBar>,
+    file_pb: Option<&ProgressBar>,
     options: &CopyOptions,
 ) -> CopyResult<bool> {
     let src_file = std::fs::File::open(source).map_err(|e| CopyError::CopyFailed {
@@ -48,7 +49,6 @@ pub fn fast_copy(
     const TARGET_UPDATES: u64 = 128;
     const MIN_CHUNK: usize = 4 * 1024 * 1024;
     let chunk_size = std::cmp::max(MIN_CHUNK, (file_size / TARGET_UPDATES) as usize);
-    let mut total_copied = 0u64;
     loop {
         if options.abort.load(Ordering::Relaxed) {
             drop(dest_file); // Close file
@@ -67,15 +67,15 @@ pub fn fast_copy(
             )));
         }
 
-        let to_copy = std::cmp::min(chunk_size, (file_size - total_copied) as usize);
-        if to_copy == 0 {
-            break;
-        }
-        match copy_file_range(&src_file, None, &dest_file, None, to_copy) {
+        // Don't bound by file_size: procfs/sysfs files report st_size 0 but
+        // still have content, and copy_file_range returns 0 at real EOF.
+        match copy_file_range(&src_file, None, &dest_file, None, chunk_size) {
             Ok(0) => break,
             Ok(copied) => {
-                total_copied += copied as u64;
                 if let Some(pb) = overall_pb {
+                    pb.inc(copied as u64);
+                }
+                if let Some(pb) = file_pb {
                     pb.inc(copied as u64);
                 }
             }
