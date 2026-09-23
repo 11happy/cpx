@@ -46,6 +46,9 @@ pub enum CopyError {
         destination: PathBuf,
     },
     PreserveFailed(PreserveError),
+    /// The user answered "no" to an -i overwrite prompt; like GNU cp the
+    /// copy continues but the exit status becomes 1.
+    OverwriteDeclined(PathBuf),
 }
 
 #[derive(Debug)]
@@ -90,6 +93,9 @@ impl fmt::Display for CopyError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             CopyError::Io(e) => write!(f, "IO error: {}", e),
+            CopyError::OverwriteDeclined(path) => {
+                write!(f, "not overwriting '{}'", path.display())
+            }
             CopyError::FileExists(path) => write!(f, "File already exists: {}", path.display()),
             CopyError::PermissionDenied(path) => write!(f, "Permission denied: {}", path.display()),
             CopyError::InvalidSource(path) => write!(f, "Invalid source path: {}", path.display()),
@@ -277,6 +283,7 @@ impl CopyError {
             CopyError::HardlinkFailed { .. } => io::ErrorKind::Other,
             CopyError::SymlinkFailed { .. } => io::ErrorKind::Other,
             CopyError::PreserveFailed(_) => io::ErrorKind::Other,
+            CopyError::OverwriteDeclined(_) => io::ErrorKind::Other,
         }
     }
 }

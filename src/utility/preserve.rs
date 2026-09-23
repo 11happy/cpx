@@ -1,7 +1,6 @@
 use crate::error::{PreserveError, PreserveResult};
-use std::collections::HashMap;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -101,6 +100,24 @@ pub fn apply_preserve_attrs(
         path: source.to_path_buf(),
         attribute: "metadata".to_string(),
     })?;
+    // Order matters: xattrs and the SELinux context need write access to the
+    // file, so they go before the mode is narrowed; timestamps go last.
+    #[cfg(unix)]
+    if attrs.xattr {
+        preserve_xattr(source, destination).map_err(|_e| PreserveError::FailedToPreserve {
+            path: destination.to_path_buf(),
+            attribute: "xattr".to_string(),
+        })?;
+    }
+
+    #[cfg(unix)]
+    if attrs.context {
+        preserve_context(source, destination).map_err(|_e| PreserveError::FailedToPreserve {
+            path: destination.to_path_buf(),
+            attribute: "context".to_string(),
+        })?;
+    }
+
     if attrs.timestamps {
         preserve_timestamps(destination, &src_metadata).map_err(|_e| {
             PreserveError::FailedToPreserve {
@@ -117,6 +134,11 @@ pub fn apply_preserve_attrs(
                 attribute: "mode".to_string(),
             }
         })?;
+        // GNU cp treats POSIX ACLs as part of the mode; --preserve=xattr
+        // already copies them along with everything else.
+        if !attrs.xattr {
+            preserve_acl(source, destination);
+        }
     }
 
     #[cfg(unix)]
@@ -129,19 +151,12 @@ pub fn apply_preserve_attrs(
         })?;
     }
 
-    #[cfg(unix)]
-    if attrs.xattr {
-        preserve_xattr(source, destination).map_err(|_e| PreserveError::FailedToPreserve {
-            path: destination.to_path_buf(),
-            attribute: "xattr".to_string(),
-        })?;
-    }
-
-    #[cfg(unix)]
-    if attrs.context {
-        preserve_context(source, destination).map_err(|_e| PreserveError::FailedToPreserve {
-            path: destination.to_path_buf(),
-            attribute: "context".to_string(),
+    if attrs.timestamps {
+        preserve_timestamps(destination, &src_metadata).map_err(|_e| {
+            PreserveError::FailedToPreserve {
+                path: destination.to_path_buf(),
+                attribute: "timestamps".to_string(),
+            }
         })?;
     }
 
@@ -181,7 +196,7 @@ fn preserve_ownership(destination: &Path, src_metadata: &std::fs::Metadata) -> i
 
     // Note: This requires elevated privileges (root) to work in most cases
     // We'll attempt it but won't fail if it doesn't work
-    let dest_cstring = std::ffi::CString::new(destination.to_string_lossy().as_bytes())
+    let dest_cstring = std::ffi::CString::new(destination.as_os_str().as_encoded_bytes())
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
 
     unsafe {
@@ -197,6 +212,18 @@ fn preserve_ownership(destination: &Path, src_metadata: &std::fs::Metadata) -> i
     }
 
     Ok(())
+}
+
+#[cfg(unix)]
+fn preserve_acl(source: &Path, destination: &Path) {
+    if !xattr::SUPPORTED_PLATFORM {
+        return;
+    }
+    for name in ["system.posix_acl_access", "system.posix_acl_default"] {
+        if let Ok(Some(value)) = xattr::get(source, name) {
+            let _ = xattr::set(destination, name, &value);
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -247,62 +274,6 @@ pub fn preserve_context(_source: &Path, _destination: &Path) -> io::Result<()> {
     Ok(()) // No-op when SELinux support is disabled
 }
 
-#[cfg(unix)]
-pub struct HardLinkTracker {
-    inode_to_destination: HashMap<u64, PathBuf>,
-}
-
-#[cfg(unix)]
-impl Default for HardLinkTracker {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl HardLinkTracker {
-    pub fn new() -> Self {
-        Self {
-            inode_to_destination: HashMap::new(),
-        }
-    }
-
-    pub fn track_and_create_link(&mut self, source: &Path, destination: &Path) -> io::Result<bool> {
-        use std::os::unix::fs::MetadataExt;
-
-        let src_metadata = std::fs::metadata(source)?;
-        let inode = src_metadata.ino();
-
-        // Check if we've already created a destination for this inode
-        if let Some(existing_dest) = self.inode_to_destination.get(&inode) {
-            // Create a hard link to the existing destination
-            std::fs::hard_link(existing_dest, destination)?;
-            Ok(true) // Created a hard link
-        } else {
-            // First time seeing this inode, store the destination
-            self.inode_to_destination
-                .insert(inode, destination.to_path_buf());
-            Ok(false) // Need to copy the file normally
-        }
-    }
-}
-
-#[cfg(not(unix))]
-pub struct HardLinkTracker;
-
-#[cfg(not(unix))]
-impl HardLinkTracker {
-    pub fn new() -> Self {
-        Self
-    }
-
-    pub fn track_and_create_link(
-        &mut self,
-        _source: &Path,
-        _destination: &Path,
-    ) -> io::Result<bool> {
-        Ok(false) // No hard link support on non-Unix systems
-    }
-}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -495,40 +466,5 @@ mod tests {
 
         let dest_mode = fs::metadata(&dest).unwrap().permissions().mode() & 0o777;
         assert_eq!(dest_mode, 0o600);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn test_hard_link_tracker() {
-        use std::os::unix::fs::MetadataExt;
-
-        let temp_dir = TempDir::new().unwrap();
-        let source1 = temp_dir.path().join("source1.txt");
-        let source2 = temp_dir.path().join("source2.txt");
-        let dest1 = temp_dir.path().join("dest1.txt");
-        let dest2 = temp_dir.path().join("dest2.txt");
-
-        fs::write(&source1, b"test content").unwrap();
-        fs::hard_link(&source1, &source2).unwrap();
-
-        let mut tracker = HardLinkTracker::new();
-
-        // First file should not create a hard link (first in group), so we need to copy it manually
-        let first_result = tracker.track_and_create_link(&source1, &dest1).unwrap();
-        assert!(!first_result);
-        // Create the first destination file manually since track_and_create_link returned false
-        fs::copy(&source1, &dest1).unwrap();
-
-        // Second file should create a hard link to the first destination
-        let second_result = tracker.track_and_create_link(&source2, &dest2).unwrap();
-        assert!(second_result);
-
-        // Verify both destinations exist and are hard linked
-        assert!(dest1.exists());
-        assert!(dest2.exists());
-
-        let dest1_inode = fs::metadata(&dest1).unwrap().ino();
-        let dest2_inode = fs::metadata(&dest2).unwrap().ino();
-        assert_eq!(dest1_inode, dest2_inode);
     }
 }

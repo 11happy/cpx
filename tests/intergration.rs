@@ -392,8 +392,7 @@ fn test_symlink_mode_auto_relative() {
     // the other tests running in parallel threads.
     cpx()
         .current_dir(temp.path())
-        .arg("-s")
-        .arg("auto")
+        .arg("-s=auto")
         .arg("source.txt")
         .arg("dest")
         .assert()
@@ -417,8 +416,7 @@ fn test_symlink_mode_absolute() {
     dest_dir.create_dir_all().unwrap();
 
     cpx()
-        .arg("-s")
-        .arg("absolute")
+        .arg("-s=absolute")
         .arg(source.path())
         .arg(dest_dir.path())
         .assert()
@@ -442,8 +440,7 @@ fn test_symlink_directory_recursive() {
 
     cpx()
         .arg("-r")
-        .arg("-s")
-        .arg("relative")
+        .arg("-s=relative")
         .arg(source_dir.path())
         .arg(dest_dir.path())
         .assert()
@@ -557,8 +554,7 @@ fn test_backup_simple() {
     dest.write_str("old content").unwrap();
 
     cpx()
-        .arg("-b")
-        .arg("simple")
+        .arg("-b=simple")
         .arg(source.path())
         .arg(dest.path())
         .assert()
@@ -578,8 +574,7 @@ fn test_backup_numbered() {
     dest.write_str("version 0").unwrap();
 
     cpx()
-        .arg("-b")
-        .arg("numbered")
+        .arg("-b=numbered")
         .arg(source.path())
         .arg(dest.path())
         .assert()
@@ -590,8 +585,7 @@ fn test_backup_numbered() {
     source.write_str("version 2").unwrap();
 
     cpx()
-        .arg("-b")
-        .arg("numbered")
+        .arg("-b=numbered")
         .arg(source.path())
         .arg(dest.path())
         .assert()
@@ -611,8 +605,7 @@ fn test_backup_existing_mode() {
 
     // First backup with existing mode (no numbered backups exist)
     cpx()
-        .arg("-b")
-        .arg("existing")
+        .arg("-b=existing")
         .arg(source.path())
         .arg(dest.path())
         .assert()
@@ -628,8 +621,7 @@ fn test_backup_existing_mode() {
 
     // Now it should use numbered
     cpx()
-        .arg("-b")
-        .arg("existing")
+        .arg("-b=existing")
         .arg(source.path())
         .arg(dest.path())
         .assert()
@@ -652,8 +644,7 @@ fn test_preserve_mode() {
     fs::set_permissions(source.path(), perms).unwrap();
 
     cpx()
-        .arg("-p")
-        .arg("mode")
+        .arg("-p=mode")
         .arg(source.path())
         .arg(dest.path())
         .assert()
@@ -674,8 +665,7 @@ fn test_preserve_timestamps() {
     std::thread::sleep(std::time::Duration::from_millis(100));
 
     cpx()
-        .arg("-p")
-        .arg("timestamps")
+        .arg("-p=timestamps")
         .arg(source.path())
         .arg(dest.path())
         .assert()
@@ -1277,8 +1267,7 @@ fn test_reflink_auto() {
     source.write_str("reflink content").unwrap();
 
     cpx()
-        .arg("--reflink")
-        .arg("auto")
+        .arg("--reflink=auto")
         .arg(source.path())
         .arg(dest.path())
         .assert()
@@ -1297,8 +1286,7 @@ fn test_reflink_never() {
     source.write_str("content").unwrap();
 
     cpx()
-        .arg("--reflink")
-        .arg("never")
+        .arg("--reflink=never")
         .arg(source.path())
         .arg(dest.path())
         .assert()
@@ -1467,8 +1455,7 @@ fn test_copy_with_multiple_flags() {
     cpx()
         .arg("-r")
         .arg("-f")
-        .arg("-p")
-        .arg("mode,timestamps")
+        .arg("-p=mode,timestamps")
         .arg("-e")
         .arg("*.log")
         .arg("-j")

@@ -1,20 +1,22 @@
 use crate::cli::args::{BackupMode, CopyOptions, FollowSymlink};
 #[cfg(target_os = "linux")]
-use crate::core::fast_copy::fast_copy;
+use crate::core::fast_copy::{FastCopy, fast_copy};
+
 use crate::error::{CopyError, CopyResult};
 use crate::utility::backup::{create_backup, generate_backup_path};
 use crate::utility::helper::{
-    create_directories, create_hardlink, create_symlink, prompt_overwrite, truncate_filename,
+    create_directories, create_fifo, create_hardlink, create_symlink, process_umask,
+    prompt_overwrite, same_dir_entry, same_file, truncate_filename,
 };
 use crate::utility::preprocess::{
     CopyPlan, preprocess_directory, preprocess_file, preprocess_multiple,
 };
-use crate::utility::preserve::{self, HardLinkTracker, PreserveAttr};
+use crate::utility::preserve::{self, PreserveAttr};
 use crate::utility::progress_bar::ProgressBarStyle;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use std::io::{self, Read, Write};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
 use std::{path::Path, path::PathBuf};
 
 pub fn copy(source: &Path, destination: &Path, options: &CopyOptions) -> CopyResult<()> {
@@ -103,16 +105,16 @@ fn log_verbose(multi: Option<&MultiProgress>, source: &Path, destination: &Path)
     }
 }
 
-fn execute_copy(plan: CopyPlan, options: &CopyOptions) -> CopyResult<()> {
+fn execute_copy(mut plan: CopyPlan, options: &CopyOptions) -> CopyResult<()> {
+    // Read the umask now, while single-threaded (see process_umask).
+    process_umask();
+
+    if options.preserve.links {
+        plan.link_duplicate_inodes();
+    }
+
     if !options.attributes_only {
-        create_directories(&plan.directories)?;
-        if options.verbose {
-            for dir_task in &plan.directories {
-                if let Some(src) = &dir_task.source {
-                    log_verbose(None, src, &dir_task.destination);
-                }
-            }
-        }
+        create_directories(&plan.directories, options.verbose)?;
     } else {
         for dir_task in &plan.directories {
             if let Some(src) = &dir_task.source
@@ -126,20 +128,6 @@ fn execute_copy(plan: CopyPlan, options: &CopyOptions) -> CopyResult<()> {
                     })?;
             }
         }
-    }
-
-    if options.hard_link {
-        for hardlink_task in &plan.hardlinks {
-            create_hardlink(hardlink_task, options)?;
-            if options.verbose {
-                log_verbose(None, &hardlink_task.source, &hardlink_task.destination);
-            }
-        }
-
-        if plan.total_hardlinks > 0 {
-            println!("Created {} hard links", plan.total_hardlinks);
-        }
-        return Ok(());
     }
 
     if !plan.symlinks.is_empty() {
@@ -161,6 +149,29 @@ fn execute_copy(plan: CopyPlan, options: &CopyOptions) -> CopyResult<()> {
         }
     }
 
+    if !options.attributes_only {
+        for fifo_task in &plan.fifos {
+            create_fifo(fifo_task, options)?;
+            if options.verbose {
+                log_verbose(None, &fifo_task.source, &fifo_task.destination);
+            }
+        }
+    }
+
+    if options.hard_link {
+        for hardlink_task in &plan.hardlinks {
+            create_hardlink(hardlink_task, options)?;
+            if options.verbose {
+                log_verbose(None, &hardlink_task.source, &hardlink_task.destination);
+            }
+        }
+
+        if plan.total_hardlinks > 0 {
+            println!("Created {} hard links", plan.total_hardlinks);
+        }
+        return Ok(());
+    }
+
     let (multi, overall_pb) =
         if plan.total_files >= 1 && !options.interactive && !options.attributes_only {
             let multi = MultiProgress::new();
@@ -173,27 +184,26 @@ fn execute_copy(plan: CopyPlan, options: &CopyOptions) -> CopyResult<()> {
 
     let completed_files = Arc::new(AtomicUsize::new(0));
 
-    // Initialize hard link tracker if preserve.links is enabled
-    let hardlink_tracker = if options.preserve.links {
-        Some(Arc::new(Mutex::new(HardLinkTracker::new())))
-    } else {
-        None
-    };
+    let mut declined = None;
 
     // For interactive mode, process sequentially
     if options.interactive {
-        for file_task in plan.files {
-            copy_core(
+        for file_task in &plan.files {
+            match copy_core(
                 &file_task.source,
                 &file_task.destination,
                 file_task.size,
+                file_task.mode,
                 multi.as_ref(),
                 overall_pb.as_deref(),
                 &completed_files,
                 plan.total_files,
                 options,
-                hardlink_tracker.as_ref(),
-            )?;
+            ) {
+                Ok(()) => {}
+                Err(CopyError::OverwriteDeclined(path)) => declined = Some(path),
+                Err(e) => return Err(e),
+            }
         }
     } else {
         let pool = rayon::ThreadPoolBuilder::new()
@@ -221,12 +231,12 @@ fn execute_copy(plan: CopyPlan, options: &CopyOptions) -> CopyResult<()> {
                     &file_task.source,
                     &file_task.destination,
                     file_task.size,
+                    file_task.mode,
                     multi.as_ref(),
                     overall_pb.as_deref(),
                     &completed_files,
                     plan.total_files,
                     options,
-                    hardlink_tracker.as_ref(),
                 ) {
                     errors.push((file_task.source.clone(), file_task.destination.clone(), e));
                 }
@@ -247,6 +257,9 @@ fn execute_copy(plan: CopyPlan, options: &CopyOptions) -> CopyResult<()> {
                 }
             }
         }
+
+        create_preserved_links(&plan, options)?;
+        preserve_directory_attrs(&plan, options)?;
 
         if interrupted {
             let completed = completed_files.load(Ordering::Relaxed);
@@ -278,6 +291,11 @@ fn execute_copy(plan: CopyPlan, options: &CopyOptions) -> CopyResult<()> {
         }
     }
 
+    if options.interactive {
+        create_preserved_links(&plan, options)?;
+        preserve_directory_attrs(&plan, options)?;
+    }
+
     if let Some(pb) = overall_pb {
         if matches!(options.progress_bar.style, ProgressBarStyle::Detailed)
             && !options.attributes_only
@@ -288,7 +306,10 @@ fn execute_copy(plan: CopyPlan, options: &CopyOptions) -> CopyResult<()> {
         }
     }
 
-    Ok(())
+    match declined {
+        Some(path) => Err(CopyError::OverwriteDeclined(path)),
+        None => Ok(()),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -296,64 +317,100 @@ fn copy_core(
     source: &Path,
     destination: &Path,
     file_size: u64,
+    file_mode: u32,
     multi: Option<&MultiProgress>,
     overall_pb: Option<&ProgressBar>,
     completed_files: &AtomicUsize,
     total_files: usize,
     options: &CopyOptions,
-    hardlink_tracker: Option<&Arc<Mutex<HardLinkTracker>>>,
 ) -> CopyResult<()> {
     if options.attributes_only {
         if std::fs::symlink_metadata(destination).is_err() {
-            return Ok(());
+            // GNU cp creates an empty destination to carry the attributes.
+            std::fs::File::create(destination)?;
         }
         preserve::apply_preserve_attrs(source, destination, options.preserve)?;
         return Ok(());
+    }
+
+    // Refuse to copy a file onto itself (also via a symlink or hard link to
+    // it): the destination would be truncated before it is read. GNU cp
+    // allows it only with --force --backup, where the backup becomes the source.
+    let mut is_same_file = same_file(source, destination);
+    if is_same_file && options.remove_destination && !same_dir_entry(source, destination) {
+        // A symlink or hard link to the source can be removed without
+        // touching the source; the source's own directory entry cannot.
+        std::fs::remove_file(destination)?;
+        is_same_file = false;
+    }
+    let backup_of_self;
+    let copy_from_backup =
+        is_same_file && options.force && options.backup.is_some_and(|b| b != BackupMode::None);
+    let source = if copy_from_backup {
+        backup_of_self = generate_backup_path(destination, options.backup.unwrap())?;
+        create_backup(destination, &backup_of_self)?;
+        backup_of_self.as_path()
+    } else {
+        source
+    };
+    if is_same_file && !copy_from_backup {
+        return Err(CopyError::CopyFailed {
+            source: source.to_path_buf(),
+            destination: destination.to_path_buf(),
+            reason: format!(
+                "'{}' and '{}' are the same file",
+                source.display(),
+                destination.display()
+            ),
+        });
     }
 
     if options.interactive
         && destination.try_exists().unwrap_or(false)
         && !prompt_overwrite(destination)?
     {
-        return Ok(());
+        return Err(CopyError::OverwriteDeclined(destination.to_path_buf()));
     }
 
     if let Some(backup_mode) = options.backup
         && backup_mode != BackupMode::None
         && destination.try_exists().unwrap_or(false)
+        && !is_same_file
     {
         let backup_path = generate_backup_path(destination, backup_mode)?;
+        if same_file(source, &backup_path) {
+            return Err(CopyError::CopyFailed {
+                source: source.to_path_buf(),
+                destination: destination.to_path_buf(),
+                reason: format!(
+                    "backing up '{}' might destroy source; '{}' not copied",
+                    destination.display(),
+                    source.display()
+                ),
+            });
+        }
         let _ = create_backup(destination, &backup_path);
     }
 
     if options.remove_destination {
         let _ = std::fs::remove_file(destination);
-    }
-
-    // Handle hard link preservation
-    if let Some(tracker) = hardlink_tracker {
-        let mut tracker_guard = tracker.lock().map_err(|_| {
-            CopyError::Io(io::Error::other("Failed to acquire hardlink tracker lock"))
-        })?;
-
-        if tracker_guard.track_and_create_link(source, destination)? {
-            // Hard link was created, no need to copy file content
-            update_progress(
-                source,
-                destination,
-                multi,
-                overall_pb,
-                completed_files,
-                total_files,
-                options,
-            );
-            if options.preserve != PreserveAttr::none() {
-                preserve::apply_preserve_attrs(source, destination, options.preserve)
-                    .map_err(CopyError::from)?;
-            }
-            return Ok(());
+    } else if destination.is_symlink()
+        && let Err(e) = std::fs::metadata(destination)
+    {
+        if options.force && e.raw_os_error() == Some(libc::ELOOP) {
+            // -f: a destination that cannot be opened is removed and retried.
+            std::fs::remove_file(destination)?;
+        } else {
+            // GNU cp refuses to create the target of a dangling destination symlink.
+            return Err(CopyError::CopyFailed {
+                source: source.to_path_buf(),
+                destination: destination.to_path_buf(),
+                reason: format!(
+                    "not writing through dangling symlink '{}'",
+                    destination.display()
+                ),
+            });
         }
-        // Continue with normal file copy if this is the first file in the inode group
     }
 
     if let Some(reflink_mode) = options.reflink {
@@ -402,48 +459,57 @@ fn copy_core(
         _ => None,
     };
 
+    // A read-only source (e.g. 0444) is created writable first so that
+    // xattrs and ACLs can still be applied, then narrowed in finish_file.
+    let create_mode = file_mode | 0o200;
+
     #[cfg(target_os = "linux")]
-    {
+    let (mut src_file, dest_file) = {
         if options.abort.load(Ordering::Relaxed) {
             return Err(CopyError::Io(io::Error::new(
                 io::ErrorKind::Interrupted,
                 "Operation aborted by user",
             )));
         }
-        if let Ok(true) = fast_copy(
+        match fast_copy(
             source,
             destination,
             file_size,
+            create_mode,
             overall_pb,
             file_pb.as_ref(),
             options,
-        ) {
-            finish_file_bar(multi, file_pb);
-            update_progress(
-                source,
-                destination,
-                multi,
-                overall_pb,
-                completed_files,
-                total_files,
-                options,
-            );
-            if options.preserve != PreserveAttr::none() {
-                preserve::apply_preserve_attrs(source, destination, options.preserve)
-                    .map_err(CopyError::from)?;
+        )? {
+            FastCopy::Done => {
+                finish_file_bar(multi, file_pb);
+                update_progress(
+                    source,
+                    destination,
+                    multi,
+                    overall_pb,
+                    completed_files,
+                    total_files,
+                    options,
+                );
+                return finish_file(source, destination, file_mode, options);
             }
-            return Ok(());
+            FastCopy::Fallback(src_file, dest_file) => (src_file, dest_file),
         }
-    }
+    };
 
-    let mut src_file = std::fs::File::open(source)?;
-    let dest_file = match std::fs::File::create(destination) {
-        Ok(file) => file,
-        Err(_e) if options.force => {
-            let _ = std::fs::remove_file(destination);
-            std::fs::File::create(destination)?
-        }
-        Err(e) => return Err(CopyError::Io(e)),
+    #[cfg(not(target_os = "linux"))]
+    let (mut src_file, dest_file) = {
+        use crate::utility::helper::create_with_mode;
+        let src_file = std::fs::File::open(source)?;
+        let dest_file = match create_with_mode(destination, create_mode) {
+            Ok(file) => file,
+            Err(_e) if options.force => {
+                let _ = std::fs::remove_file(destination);
+                create_with_mode(destination, create_mode)?
+            }
+            Err(e) => return Err(CopyError::Io(e)),
+        };
+        (src_file, dest_file)
     };
 
     let buffer_size: usize = if file_size < 1024 * 1024 {
@@ -530,11 +596,69 @@ fn copy_core(
         options,
     );
 
+    finish_file(source, destination, file_mode, options)
+}
+
+/// Apply preserved attributes, then drop the owner-write bit added at
+/// creation when the source did not have it (mode & !umask, like GNU cp).
+fn finish_file(
+    source: &Path,
+    destination: &Path,
+    file_mode: u32,
+    options: &CopyOptions,
+) -> CopyResult<()> {
     if options.preserve != PreserveAttr::none() {
         preserve::apply_preserve_attrs(source, destination, options.preserve)
             .map_err(CopyError::from)?;
     }
+    #[cfg(unix)]
+    if file_mode & 0o200 == 0 && !options.preserve.mode {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = file_mode & !process_umask();
+        std::fs::set_permissions(destination, std::fs::Permissions::from_mode(mode))?;
+    }
+    Ok(())
+}
 
+/// --preserve=links: re-link files that were hard links of an already
+/// copied file. Runs after the copy phase so the link target exists.
+fn create_preserved_links(plan: &CopyPlan, options: &CopyOptions) -> CopyResult<()> {
+    for task in &plan.preserved_links {
+        if task.destination.symlink_metadata().is_ok() {
+            std::fs::remove_file(&task.destination)?;
+        }
+        std::fs::hard_link(&task.source, &task.destination).map_err(|_e| {
+            CopyError::HardlinkFailed {
+                source: task.source.clone(),
+                destination: task.destination.clone(),
+            }
+        })?;
+        if options.verbose {
+            log_verbose(None, &task.source, &task.destination);
+        }
+    }
+    Ok(())
+}
+
+/// Directory attributes go last and deepest-first: a read-only or
+/// timestamp-preserved directory must not be touched before its contents.
+fn preserve_directory_attrs(plan: &CopyPlan, options: &CopyOptions) -> CopyResult<()> {
+    if options.preserve == PreserveAttr::none() || options.attributes_only {
+        return Ok(());
+    }
+    for dir_task in plan.directories.iter().rev() {
+        if let Some(src) = &dir_task.source
+            && dir_task.destination.is_dir()
+        {
+            preserve::apply_preserve_attrs(src, &dir_task.destination, options.preserve).map_err(
+                |e| CopyError::CopyFailed {
+                    source: src.clone(),
+                    destination: dir_task.destination.clone(),
+                    reason: e.to_string(),
+                },
+            )?;
+        }
+    }
     Ok(())
 }
 

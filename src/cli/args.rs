@@ -92,7 +92,7 @@ pub struct CopyArgs {
     pub exclude: Vec<String>,
 
     // Copy Behavior Options
-    #[arg(short, long, help = "Copy directories recursively")]
+    #[arg(short, short_alias = 'R', long, help = "Copy directories recursively")]
     pub recursive: bool,
 
     #[arg(
@@ -157,7 +157,8 @@ pub struct CopyArgs {
         value_name = "MODE",
         default_missing_value = "auto",
         num_args = 0..=1,
-        help = "make symbolic links instead of copying (auto, absolute, or relative)"
+        require_equals = true,
+        help = "make symbolic links instead of copying (-s=auto, -s=absolute, or -s=relative)"
     )]
     pub symbolic_link: Option<SymlinkMode>,
 
@@ -195,7 +196,9 @@ pub struct CopyArgs {
         long = "preserve",
         value_name = "ATTR_LIST",
         default_missing_value = "",
-        help = "preserve the specified attributes"
+        num_args = 0..=1,
+        require_equals = true,
+        help = "preserve the specified attributes (-p alone: mode,ownership,timestamps; --preserve=all, --preserve=mode,xattr,...)"
     )]
     pub preserve: Option<String>,
 
@@ -206,7 +209,8 @@ pub struct CopyArgs {
         value_name = "CONTROL",
         default_missing_value = "existing",
         num_args = 0..=1,
-        help = "make a backup of each existing destination file (none, numbered, existing, simple)"
+        require_equals = true,
+        help = "make a backup of each existing destination file (--backup=none|numbered|existing|simple)"
     )]
     pub backup: Option<BackupMode>,
 
@@ -215,7 +219,8 @@ pub struct CopyArgs {
         value_name = "WHEN",
         default_missing_value = "auto",
         num_args = 0..=1,
-        help = "control clone/CoW copies (auto, always, never)"
+        require_equals = true,
+        help = "control clone/CoW copies (--reflink=auto|always|never)"
     )]
     pub reflink: Option<ReflinkMode>,
 
@@ -339,16 +344,16 @@ impl From<&CopyArgs> for CopyOptions {
 impl CLIArgs {
     /// Parse arguments with implicit copy command support
     pub fn parse() -> Self {
-        let mut args: Vec<String> = std::env::args().collect();
+        // args_os: paths are not required to be valid UTF-8.
+        let mut args: Vec<std::ffi::OsString> = std::env::args_os().collect();
 
         if args.len() > 1 {
-            let first_arg = &args[1];
             let is_subcommand = matches!(
-                first_arg.as_str(),
-                "config" | "copy" | "-h" | "--help" | "-V" | "--version"
+                args[1].to_str(),
+                Some("config" | "copy" | "-h" | "--help" | "-V" | "--version")
             );
             if !is_subcommand {
-                args.insert(1, "copy".to_string());
+                args.insert(1, "copy".into());
                 return <Self as clap::Parser>::parse_from(args);
             }
         }
@@ -482,8 +487,13 @@ fn apply_cli_overrides(options: &mut CopyOptions, copy_args: &CopyArgs) -> Resul
     options.parallel = copy_args.parallel;
 
     options.follow_symlink = copy_args.follow_symlink_mode()?;
+    let explicit_deref =
+        copy_args.no_dereference || copy_args.dereference || copy_args.dereference_command_line;
     if copy_args.archive && !copy_args.dereference && !copy_args.dereference_command_line {
         options.follow_symlink = FollowSymlink::NoDereference;
+    } else if copy_args.hard_link && !explicit_deref {
+        // GNU cp: -l without -P/-H/-L links the symlink targets (DEREF_ALWAYS).
+        options.follow_symlink = FollowSymlink::Dereference;
     }
 
     Ok(())
@@ -506,6 +516,10 @@ fn build_all_exclude_patterns(
 }
 
 fn validate_conflicts(options: &CopyOptions) -> Result<(), String> {
+    if options.no_clobber && options.backup.is_some_and(|b| b != BackupMode::None) {
+        return Err("--backup and --no-clobber cannot be used together".to_string());
+    }
+
     if options.reflink.is_some() {
         if options.hard_link {
             return Err("--reflink and --link cannot be used together".to_string());

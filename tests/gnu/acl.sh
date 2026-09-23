@@ -1,3 +1,4 @@
+#!/bin/sh
 # copy files/directories across file system boundaries
 # and make sure acls are preserved appropriately
 #

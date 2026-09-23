@@ -3,11 +3,14 @@ use super::progress_bar::{ProgressBarStyle, ProgressOptions};
 use crate::cli::args::{BackupMode, CopyOptions, FollowSymlink, ReflinkMode, SymlinkMode};
 use crate::config::schema::Config;
 use crate::error::{CopyError, CopyResult};
-use crate::utility::preprocess::HardlinkTask;
+use crate::utility::preprocess::{FifoTask, HardlinkTask};
 use std::io;
 use std::path::{Path, PathBuf};
 
-pub fn create_directories(dirs: &[crate::utility::preprocess::DirectoryTask]) -> io::Result<()> {
+pub fn create_directories(
+    dirs: &[crate::utility::preprocess::DirectoryTask],
+    verbose: bool,
+) -> io::Result<()> {
     let mut dirs: Vec<_> = dirs.iter().collect();
     dirs.sort_unstable_by_key(|d| d.destination.components().count());
     dirs.dedup_by_key(|d| &d.destination);
@@ -15,32 +18,130 @@ pub fn create_directories(dirs: &[crate::utility::preprocess::DirectoryTask]) ->
     for dir in &dirs {
         match std::fs::create_dir(&dir.destination) {
             Ok(()) => {}
-            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
                 std::fs::create_dir_all(&dir.destination)?;
             }
             Err(e) => return Err(e),
         }
+        // -v reports directories as GNU cp does: only the ones it created.
+        if verbose && let Some(src) = &dir.source {
+            println!("'{}' -> '{}'", src.display(), dir.destination.display());
+        }
     }
     Ok(())
 }
 
+/// True when both paths name the same directory entry (same parent
+/// directory and same file name), as opposed to another link to the inode.
+pub fn same_dir_entry(a: &Path, b: &Path) -> bool {
+    fn key(p: &Path) -> Option<(PathBuf, std::ffi::OsString)> {
+        let name = p.file_name()?.to_os_string();
+        let parent = match p.parent() {
+            Some(parent) if !parent.as_os_str().is_empty() => parent.canonicalize().ok()?,
+            _ => Path::new(".").canonicalize().ok()?,
+        };
+        Some((parent, name))
+    }
+    matches!((key(a), key(b)), (Some(ka), Some(kb)) if ka == kb)
+}
+
+/// Create (or truncate) the destination like File::create, but with the
+/// source's permission bits so the kernel applies `mode & !umask`.
+#[cfg(unix)]
+pub fn create_with_mode(path: &Path, mode: u32) -> io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(mode)
+        .open(path)
+}
+
+#[cfg(not(unix))]
+pub fn create_with_mode(path: &Path, _mode: u32) -> io::Result<std::fs::File> {
+    std::fs::File::create(path)
+}
+
+/// The process umask. umask(2) can only be read by setting it, so this is
+/// read once, before any copy thread exists, and cached.
+#[cfg(unix)]
+pub fn process_umask() -> u32 {
+    use std::sync::OnceLock;
+    static UMASK: OnceLock<u32> = OnceLock::new();
+    *UMASK.get_or_init(|| {
+        let old = unsafe { libc::umask(0) };
+        unsafe { libc::umask(old) };
+        old as u32
+    })
+}
+
+#[cfg(not(unix))]
+pub fn process_umask() -> u32 {
+    0o022
+}
+
+/// True when both paths resolve to the same inode (following symlinks).
+#[cfg(unix)]
+pub fn same_file(a: &Path, b: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    match (std::fs::metadata(a), std::fs::metadata(b)) {
+        (Ok(ma), Ok(mb)) => ma.dev() == mb.dev() && ma.ino() == mb.ino(),
+        _ => false,
+    }
+}
+
+#[cfg(not(unix))]
+pub fn same_file(a: &Path, b: &Path) -> bool {
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(ca), Ok(cb)) => ca == cb,
+        _ => false,
+    }
+}
+
+/// True when `path` is itself (not via a symlink) the same inode as `target`.
+#[cfg(unix)]
+fn is_inode_of(path: &Path, target: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    match (std::fs::symlink_metadata(path), std::fs::metadata(target)) {
+        (Ok(a), Ok(b)) => a.dev() == b.dev() && a.ino() == b.ino(),
+        _ => false,
+    }
+}
+
+#[cfg(not(unix))]
+fn is_inode_of(path: &Path, target: &Path) -> bool {
+    same_file(path, target)
+}
+
 pub fn create_symlink(task: &SymlinkTask, options: &CopyOptions) -> io::Result<()> {
+    // `cpx -s foo foo` would replace foo with a link to itself; an existing
+    // symlink to foo at the destination is fine to replace.
+    if task.kind != SymlinkKind::PreserveExact && is_inode_of(&task.destination, &task.source) {
+        return Err(io::Error::other(format!(
+            "'{}' and '{}' are the same file",
+            task.source.display(),
+            task.destination.display()
+        )));
+    }
     if task.destination.is_symlink() || task.destination.try_exists().unwrap_or(false) {
         if options.interactive && !prompt_overwrite(&task.destination).map_err(io::Error::other)? {
             return Ok(());
         }
-        if options.force || options.remove_destination || options.resume {
-            std::fs::remove_file(&task.destination)?;
-        } else {
+        if options.attributes_only && !options.remove_destination {
+            // --attributes-only must never remove destination data.
             return Err(io::Error::new(
                 io::ErrorKind::AlreadyExists,
                 format!("destination already exists: {:?}", task.destination),
             ));
         }
+        // Like GNU cp, an existing non-directory destination is replaced.
+        std::fs::remove_file(&task.destination)?;
     }
     let target = match task.kind {
-        SymlinkKind::PreserveExact => task.source.clone(),
+        // `source` is the original symlink; reproduce its target verbatim.
+        SymlinkKind::PreserveExact => std::fs::read_link(&task.source)?,
         SymlinkKind::AbsoluteToSource => task.source.canonicalize()?,
         SymlinkKind::RelativeToSource => {
             let dest_parent = task.destination.parent().ok_or_else(|| {
@@ -70,10 +171,25 @@ pub fn create_symlink(task: &SymlinkTask, options: &CopyOptions) -> io::Result<(
         }
     }
 
+    if options.preserve.timestamps
+        && task.kind == SymlinkKind::PreserveExact
+        && let Ok(meta) = std::fs::symlink_metadata(&task.source)
+    {
+        let _ = filetime::set_symlink_file_times(
+            &task.destination,
+            filetime::FileTime::from_last_access_time(&meta),
+            filetime::FileTime::from_last_modification_time(&meta),
+        );
+    }
+
     Ok(())
 }
 
 pub fn create_hardlink(task: &HardlinkTask, options: &CopyOptions) -> CopyResult<()> {
+    if same_file(&task.source, &task.destination) {
+        // `cp -l foo foo` is a no-op in GNU cp.
+        return Ok(());
+    }
     if task.destination.try_exists()? {
         if options.interactive && !prompt_overwrite(&task.destination)? {
             return Ok(());
@@ -99,6 +215,32 @@ pub fn create_hardlink(task: &HardlinkTask, options: &CopyOptions) -> CopyResult
     })?;
 
     Ok(())
+}
+
+/// Recreate a named pipe at the destination (recursive copies only, like GNU cp -R).
+#[cfg(unix)]
+pub fn create_fifo(task: &FifoTask, options: &CopyOptions) -> CopyResult<()> {
+    if task.destination.symlink_metadata().is_ok() {
+        if options.interactive && !prompt_overwrite(&task.destination)? {
+            return Ok(());
+        }
+        std::fs::remove_file(&task.destination)?;
+    }
+    let path = std::ffi::CString::new(task.destination.as_os_str().as_encoded_bytes())
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+    if unsafe { libc::mkfifo(path.as_ptr(), task.mode as libc::mode_t) } != 0 {
+        return Err(CopyError::Io(io::Error::last_os_error()));
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+pub fn create_fifo(task: &FifoTask, _options: &CopyOptions) -> CopyResult<()> {
+    Err(CopyError::CopyFailed {
+        source: task.source.clone(),
+        destination: task.destination.clone(),
+        reason: "named pipes are not supported on this platform".to_string(),
+    })
 }
 
 pub fn prompt_overwrite(path: &Path) -> io::Result<bool> {

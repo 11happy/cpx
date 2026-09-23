@@ -1,6 +1,6 @@
 use cpx::cli::args::CLIArgs;
 use cpx::core::copy::{copy, multiple_copy};
-use cpx::error::CpxError;
+use cpx::error::{CopyError, CpxError};
 use signal_hook::consts::signal::*;
 use signal_hook::iterator::Signals;
 use std::process;
@@ -61,6 +61,9 @@ fn main() {
                 eprintln!("Resume with: cpx --resume [original command]");
                 eprintln!("Completed files will be skipped automatically");
                 process::exit(130); // SIGINT
+            } else if let CopyError::OverwriteDeclined(_) = e {
+                // GNU cp: declining an -i prompt is silent but exits 1.
+                process::exit(1);
             } else {
                 eprintln!("Error copying file: {}", e);
                 process::exit(1);

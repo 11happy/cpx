@@ -1,19 +1,30 @@
 use crate::cli::args::CopyOptions;
 use crate::error::{CopyError, CopyResult};
+use crate::utility::helper::create_with_mode;
 use indicatif::ProgressBar;
 use nix::fcntl::copy_file_range;
 use std::io;
 use std::path::Path;
 use std::sync::atomic::Ordering;
 
+/// Outcome of the copy_file_range fast path.
+pub enum FastCopy {
+    Done,
+    /// copy_file_range is not usable here; the caller copies through
+    /// userspace with these already-open files (reopening the destination
+    /// could fail, e.g. it was just created read-only from a 0444 source).
+    Fallback(std::fs::File, std::fs::File),
+}
+
 pub fn fast_copy(
     source: &Path,
     destination: &Path,
     file_size: u64,
+    file_mode: u32,
     overall_pb: Option<&ProgressBar>,
     file_pb: Option<&ProgressBar>,
     options: &CopyOptions,
-) -> CopyResult<bool> {
+) -> CopyResult<FastCopy> {
     let src_file = std::fs::File::open(source).map_err(|e| CopyError::CopyFailed {
         source: source.to_path_buf(),
         destination: destination.to_path_buf(),
@@ -30,7 +41,7 @@ pub fn fast_copy(
             })?;
         }
     }
-    let dest_file = match std::fs::File::create(destination) {
+    let dest_file = match create_with_mode(destination, file_mode) {
         Ok(file) => file,
         Err(_e) if options.force => {
             let _ = std::fs::remove_file(destination).map_err(|e| CopyError::CopyFailed {
@@ -38,7 +49,7 @@ pub fn fast_copy(
                 destination: destination.to_path_buf(),
                 reason: format!("Failed to remove destination: {}", e),
             });
-            std::fs::File::create(destination).map_err(|e| CopyError::CopyFailed {
+            create_with_mode(destination, file_mode).map_err(|e| CopyError::CopyFailed {
                 source: source.to_path_buf(),
                 destination: destination.to_path_buf(),
                 reason: format!("Failed to create destination: {}", e),
@@ -49,6 +60,17 @@ pub fn fast_copy(
     const TARGET_UPDATES: u64 = 128;
     const MIN_CHUNK: usize = 4 * 1024 * 1024;
     let chunk_size = std::cmp::max(MIN_CHUNK, (file_size / TARGET_UPDATES) as usize);
+
+    let dest_is_regular = dest_file.metadata().map(|m| m.is_file()).unwrap_or(false);
+    if file_size > 0 && dest_is_regular && is_sparse(&src_file, file_size) {
+        return match copy_sparse(
+            &src_file, &dest_file, file_size, chunk_size, overall_pb, file_pb, options,
+        )? {
+            true => Ok(FastCopy::Done),
+            false => Ok(rewind(src_file, dest_file)?),
+        };
+    }
+
     let mut total_copied = 0u64;
     loop {
         if options.abort.load(Ordering::Relaxed) {
@@ -86,9 +108,94 @@ pub fn fast_copy(
                 }
             }
             Err(_) => {
-                return Ok(false);
+                return Ok(rewind(src_file, dest_file)?);
             }
         }
     }
+    Ok(FastCopy::Done)
+}
+
+/// Undo any partial fast-path progress so the userspace loop starts clean.
+/// Best effort: a FIFO or device destination cannot be truncated or sought,
+/// and nothing was written to it if copy_file_range refused it up front.
+fn rewind(mut src_file: std::fs::File, mut dest_file: std::fs::File) -> io::Result<FastCopy> {
+    use std::io::{Seek, SeekFrom};
+    src_file.seek(SeekFrom::Start(0))?;
+    let _ = dest_file.set_len(0);
+    let _ = dest_file.seek(SeekFrom::Start(0));
+    Ok(FastCopy::Fallback(src_file, dest_file))
+}
+
+fn lseek(file: &std::fs::File, offset: i64, whence: i32) -> Option<i64> {
+    use std::os::fd::AsRawFd;
+    let r = unsafe { libc::lseek(file.as_raw_fd(), offset, whence) };
+    (r >= 0).then_some(r)
+}
+
+/// A file is sparse when its first hole starts before its end. The probe
+/// moves the file offset, so it is reset for the offset-based copy loop.
+fn is_sparse(src_file: &std::fs::File, file_size: u64) -> bool {
+    let sparse =
+        matches!(lseek(src_file, 0, libc::SEEK_HOLE), Some(hole) if (hole as u64) < file_size);
+    lseek(src_file, 0, libc::SEEK_SET);
+    sparse
+}
+
+/// Copy only the data extents (SEEK_DATA/SEEK_HOLE) so holes stay holes,
+/// like GNU cp's --sparse=auto, then size the destination with ftruncate.
+fn copy_sparse(
+    src_file: &std::fs::File,
+    dest_file: &std::fs::File,
+    file_size: u64,
+    chunk_size: usize,
+    overall_pb: Option<&ProgressBar>,
+    file_pb: Option<&ProgressBar>,
+    options: &CopyOptions,
+) -> CopyResult<bool> {
+    let mut offset: i64 = 0;
+    while (offset as u64) < file_size {
+        let Some(data_start) = lseek(src_file, offset, libc::SEEK_DATA) else {
+            break; // ENXIO: only holes remain
+        };
+        let data_end = lseek(src_file, data_start, libc::SEEK_HOLE).unwrap_or(file_size as i64);
+        let skipped = (data_start - offset) as u64;
+        if let Some(pb) = overall_pb {
+            pb.inc(skipped);
+        }
+        if let Some(pb) = file_pb {
+            pb.inc(skipped);
+        }
+        let mut pos_in = data_start;
+        let mut pos_out = data_start;
+        while pos_in < data_end {
+            if options.abort.load(Ordering::Relaxed) {
+                return Err(CopyError::Io(io::Error::new(
+                    io::ErrorKind::Interrupted,
+                    "Operation aborted by user",
+                )));
+            }
+            let want = std::cmp::min(chunk_size as i64, data_end - pos_in) as usize;
+            match copy_file_range(
+                src_file,
+                Some(&mut pos_in),
+                dest_file,
+                Some(&mut pos_out),
+                want,
+            ) {
+                Ok(0) => break,
+                Ok(copied) => {
+                    if let Some(pb) = overall_pb {
+                        pb.inc(copied as u64);
+                    }
+                    if let Some(pb) = file_pb {
+                        pb.inc(copied as u64);
+                    }
+                }
+                Err(_) => return Ok(false),
+            }
+        }
+        offset = data_end;
+    }
+    dest_file.set_len(file_size)?;
     Ok(true)
 }

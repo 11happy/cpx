@@ -21,7 +21,12 @@ pub struct FileTask {
     pub source: PathBuf,
     pub destination: PathBuf,
     pub size: u64,
-    pub inode_group: Option<u64>, // For tracking hard link groups
+    /// Source permission bits; the destination is created with them so a
+    /// new file gets `mode & !umask` like GNU cp, even without --preserve.
+    pub mode: u32,
+    /// (device, inode) of the source when --preserve=links is on, so files
+    /// that are hard links of each other can be re-linked in the copy.
+    pub inode_group: Option<(u64, u64)>,
 }
 
 #[derive(Debug, Clone)]
@@ -43,12 +48,23 @@ pub struct HardlinkTask {
     pub destination: PathBuf,
 }
 
+#[derive(Debug, Clone)]
+pub struct FifoTask {
+    pub source: PathBuf,
+    pub destination: PathBuf,
+    pub mode: u32,
+}
+
 #[derive(Debug)]
 pub struct CopyPlan {
     pub files: Vec<FileTask>,
     pub directories: Vec<DirectoryTask>,
     pub symlinks: Vec<SymlinkTask>,
     pub hardlinks: Vec<HardlinkTask>,
+    /// --preserve=links: later occurrences of an inode already planned as a
+    /// file copy; created as hard links to that copy after the files are done.
+    pub preserved_links: Vec<HardlinkTask>,
+    pub fifos: Vec<FifoTask>,
     pub total_size: u64,
     pub total_files: usize,
     pub total_symlinks: usize,
@@ -70,6 +86,8 @@ impl CopyPlan {
             directories: Vec::new(),
             symlinks: Vec::new(),
             hardlinks: Vec::new(),
+            preserved_links: Vec::new(),
+            fifos: Vec::new(),
             total_size: 0,
             total_files: 0,
             total_symlinks: 0,
@@ -80,7 +98,25 @@ impl CopyPlan {
     }
 
     pub fn add_file(&mut self, source: PathBuf, destination: PathBuf, size: u64) {
-        self.add_file_with_inode(source, destination, size, None);
+        self.add_file_with_inode(source, destination, size, 0o666, None);
+    }
+
+    /// Register `dest/a`, `dest/a/b`, ... for `--parents`, each paired with
+    /// the matching source ancestor so its attributes can be preserved.
+    pub fn add_parent_directories(&mut self, destination: &Path, source: &Path) {
+        let skip = if source.is_absolute() { 1 } else { 0 };
+        let mut src_ancestor = if source.is_absolute() {
+            PathBuf::from("/")
+        } else {
+            PathBuf::new()
+        };
+        let mut dest_ancestor = destination.to_path_buf();
+        let comps: Vec<_> = source.components().skip(skip).collect();
+        for comp in comps.iter().take(comps.len().saturating_sub(1)) {
+            src_ancestor.push(comp.as_os_str());
+            dest_ancestor.push(comp.as_os_str());
+            self.add_directory(Some(src_ancestor.clone()), dest_ancestor.clone());
+        }
     }
 
     /// Refuse plans where two sources map to the same destination, like GNU
@@ -124,12 +160,14 @@ impl CopyPlan {
         source: PathBuf,
         destination: PathBuf,
         size: u64,
-        inode_group: Option<u64>,
+        mode: u32,
+        inode_group: Option<(u64, u64)>,
     ) {
         self.files.push(FileTask {
             source,
             destination,
             size,
+            mode,
             inode_group,
         });
         self.total_size += size;
@@ -160,6 +198,33 @@ impl CopyPlan {
         self.total_hardlinks += 1;
     }
 
+    /// Turn every file whose (device, inode) was already planned into a hard
+    /// link of that first copy. Done once on the complete plan, so the result
+    /// is deterministic regardless of how the parallel copy is scheduled.
+    pub fn link_duplicate_inodes(&mut self) {
+        let mut first_dest: HashMap<(u64, u64), PathBuf> = HashMap::new();
+        let files = std::mem::take(&mut self.files);
+        for task in files {
+            match task.inode_group {
+                Some(key) => match first_dest.get(&key) {
+                    Some(first) => {
+                        self.total_files -= 1;
+                        self.total_size -= task.size;
+                        self.preserved_links.push(HardlinkTask {
+                            source: first.clone(),
+                            destination: task.destination,
+                        });
+                    }
+                    None => {
+                        first_dest.insert(key, task.destination.clone());
+                        self.files.push(task);
+                    }
+                },
+                None => self.files.push(task),
+            }
+        }
+    }
+
     pub fn mark_skipped(&mut self, size: u64) {
         self.skipped_files += 1;
         self.skipped_size += size;
@@ -174,6 +239,8 @@ impl CopyPlan {
         self.directories.extend(other.directories);
         self.symlinks.extend(other.symlinks);
         self.hardlinks.extend(other.hardlinks);
+        self.preserved_links.extend(other.preserved_links);
+        self.fifos.extend(other.fifos);
         self.total_size += other.total_size;
         self.total_files += other.total_files;
         self.total_symlinks += other.total_symlinks;
@@ -257,7 +324,6 @@ fn process_entry(
     dest_path: PathBuf,
     metadata: &Metadata,
     options: &CopyOptions,
-    inode_groups: &mut Option<HashMap<u64, Vec<PathBuf>>>,
 ) -> io::Result<()> {
     if let Some(exclude_rules) = &options.exclude_rules
         && should_exclude(source, source_root, exclude_rules)
@@ -265,51 +331,63 @@ fn process_entry(
         return Ok(());
     }
 
-    // Handle hard link preservation
-    let inode_group = if options.preserve.links && cfg!(unix) {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt;
-            let inode = metadata.ino();
-            let nlink = metadata.nlink();
-
-            // Only track if this is part of a hard link set (nlink > 1)
-            if nlink > 1 {
-                if inode_groups.is_none() {
-                    *inode_groups = Some(HashMap::new());
-                }
-
-                let groups = inode_groups.as_mut().unwrap();
-                let group_id = inode;
-
-                groups.entry(group_id).or_default();
-                groups.get_mut(&group_id).unwrap().push(dest_path.clone());
-
-                Some(group_id)
-            } else {
-                None
-            }
-        }
-        #[cfg(not(unix))]
-        {
-            None
-        }
+    // Handle hard link preservation (nlink is not checked: with -L two
+    // symlinks to one file must also become one inode in the copy).
+    #[cfg(unix)]
+    let inode_group = if options.preserve.links {
+        use std::os::unix::fs::MetadataExt;
+        Some((metadata.dev(), metadata.ino()))
     } else {
         None
     };
+    #[cfg(not(unix))]
+    let inode_group = None;
+
+    #[cfg(unix)]
+    if options.recursive && !metadata.file_type().is_symlink() {
+        use std::os::unix::fs::{FileTypeExt, PermissionsExt};
+        let file_type = metadata.file_type();
+        if file_type.is_fifo() {
+            plan.fifos.push(FifoTask {
+                source: source.to_path_buf(),
+                destination: dest_path,
+                mode: metadata.permissions().mode() & 0o7777,
+            });
+            return Ok(());
+        }
+        if file_type.is_socket() || file_type.is_char_device() || file_type.is_block_device() {
+            // Opening these would block or read device data; GNU cp recreates
+            // them with mknod, which needs root. Skip rather than hang.
+            eprintln!(
+                "cpx: skipping special file '{}' (not a regular file)",
+                source.display()
+            );
+            return Ok(());
+        }
+    }
 
     if metadata.file_type().is_symlink() {
         if !matches!(options.follow_symlink, FollowSymlink::Dereference) {
-            if let Some(mode) = options.symbolic_link {
+            if options.hard_link {
+                // GNU cp -l -P hard-links the symlink itself.
+                plan.add_hardlink(source.to_path_buf(), dest_path);
+            } else if let Some(mode) = options.symbolic_link {
                 let kind = symlink_kind_from_mode(source, mode);
                 plan.add_symlink(source.to_path_buf(), dest_path, kind);
             } else {
-                let original_target = std::fs::read_link(source)?;
-                plan.add_symlink(original_target, dest_path, SymlinkKind::PreserveExact);
+                plan.add_symlink(source.to_path_buf(), dest_path, SymlinkKind::PreserveExact);
             }
         }
     } else if options.hard_link {
-        plan.add_hardlink(source.to_path_buf(), dest_path);
+        // link(2) never follows symlinks; with -L/-H link the resolved target.
+        let link_source = if !matches!(options.follow_symlink, FollowSymlink::NoDereference)
+            && source.is_symlink()
+        {
+            source.canonicalize()?
+        } else {
+            source.to_path_buf()
+        };
+        plan.add_hardlink(link_source, dest_path);
     } else if let Some(mode) = options.symbolic_link {
         let kind = symlink_kind_from_mode(source, mode);
         plan.add_symlink(source.to_path_buf(), dest_path, kind);
@@ -320,7 +398,20 @@ fn process_entry(
     } else if options.no_clobber && dest_path.symlink_metadata().is_ok() {
         // GNU cp -n silently leaves existing destinations alone.
     } else {
-        plan.add_file_with_inode(source.to_path_buf(), dest_path, metadata.len(), inode_group);
+        #[cfg(unix)]
+        let mode = {
+            use std::os::unix::fs::PermissionsExt;
+            metadata.permissions().mode() & 0o7777
+        };
+        #[cfg(not(unix))]
+        let mode = 0o666;
+        plan.add_file_with_inode(
+            source.to_path_buf(),
+            dest_path,
+            metadata.len(),
+            mode,
+            inode_group,
+        );
     }
     Ok(())
 }
@@ -382,13 +473,10 @@ pub fn preprocess_file(
     {
         return Ok(plan);
     }
-    if options.parents
-        && let Some(parent) = dest_path.parent()
-    {
-        plan.add_directory(None, parent.to_path_buf());
+    if options.parents {
+        plan.add_parent_directories(destination, source);
     }
 
-    let mut inode_groups = None;
     process_entry(
         &mut plan,
         source,
@@ -396,7 +484,6 @@ pub fn preprocess_file(
         dest_path.clone(),
         &source_metadata,
         options,
-        &mut inode_groups,
     )
     .map_err(|e| CopyError::CopyFailed {
         source: source.to_path_buf(),
@@ -404,6 +491,28 @@ pub fn preprocess_file(
         reason: e.to_string(),
     })?;
     Ok(plan)
+}
+
+/// Canonicalize a path that may not exist yet: resolve the nearest existing
+/// ancestor and re-append the missing tail.
+fn canonicalize_missing(path: &Path) -> Option<PathBuf> {
+    let mut tail = Vec::new();
+    let mut cur = path.to_path_buf();
+    loop {
+        if let Ok(canon) = cur.canonicalize() {
+            let mut result = canon;
+            for comp in tail.iter().rev() {
+                result.push(comp);
+            }
+            return Some(result);
+        }
+        let name = cur.file_name()?.to_os_string();
+        tail.push(name);
+        cur = cur.parent()?.to_path_buf();
+        if cur.as_os_str().is_empty() {
+            cur = PathBuf::from(".");
+        }
+    }
 }
 
 pub fn preprocess_directory(
@@ -420,15 +529,43 @@ pub fn preprocess_directory(
         return Ok(plan);
     }
 
+    // `cpx -r dir/. dest` and `cpx -r . dest` copy the directory's contents
+    // into dest itself, as with GNU cp.
+    let source_is_dot = matches!(
+        source.components().next_back(),
+        Some(std::path::Component::CurDir)
+    ) || source.as_os_str().as_encoded_bytes().ends_with(b"/.");
     let root_destination =
         if options.parents {
             with_parents(destination, source)
+        } else if source_is_dot {
+            destination.to_path_buf()
         } else {
             destination.join(source.file_name().ok_or_else(|| {
                 io::Error::new(io::ErrorKind::InvalidInput, "Invalid source path")
             })?)
         };
 
+    // `cpx -r dir dir` or `cpx -r dir dir/sub` would recurse into its own copy.
+    if let (Ok(src_canon), Some(dest_canon)) = (
+        source.canonicalize(),
+        canonicalize_missing(&root_destination),
+    ) && dest_canon.starts_with(&src_canon)
+    {
+        return Err(CopyError::CopyFailed {
+            source: source.to_path_buf(),
+            destination: destination.to_path_buf(),
+            reason: format!(
+                "cannot copy a directory, '{}', into itself, '{}'",
+                source.display(),
+                root_destination.display()
+            ),
+        });
+    }
+
+    if options.parents {
+        plan.add_parent_directories(destination, source);
+    }
     plan.add_directory(Some(source.into()), root_destination.clone());
 
     let num_threads = num_cpus::get().min(8);
@@ -452,8 +589,6 @@ pub fn preprocess_directory(
         }
         _ => source.to_path_buf(),
     };
-
-    let mut inode_groups = None;
 
     // Stat entries and apply exclude rules inside the walker's per-directory
     // callback: it runs on the walker's thread pool, and excluded directories
@@ -519,13 +654,7 @@ pub fn preprocess_directory(
             plan.add_directory(Some(src_path.to_path_buf()), dest_path);
         } else {
             process_entry(
-                &mut plan,
-                &src_path,
-                &walk_root,
-                dest_path,
-                &metadata,
-                options,
-                &mut inode_groups,
+                &mut plan, &src_path, &walk_root, dest_path, &metadata, options,
             )?;
         }
     }
@@ -584,13 +713,10 @@ pub fn preprocess_multiple(
                 })?)
             };
 
-            if options.parents
-                && let Some(parent) = dest_path.parent()
-            {
-                plan.add_directory(None, parent.to_path_buf());
+            if options.parents {
+                plan.add_parent_directories(destination, source);
             }
 
-            let mut inode_groups = None;
             process_entry(
                 &mut plan,
                 source,
@@ -598,7 +724,6 @@ pub fn preprocess_multiple(
                 dest_path.clone(),
                 &metadata,
                 options,
-                &mut inode_groups,
             )
             .map_err(|e| CopyError::CopyFailed {
                 source: source.to_path_buf(),
