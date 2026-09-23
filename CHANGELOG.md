@@ -41,7 +41,7 @@
 
 ### Testing
 - All 68 GNU coreutils `cp` tests are ported under `tests/gnu` and run in CI
-  (48 pass, 11 documented differences, 9 skipped). See docs/gnu-compat.md.
+  (49 pass, 10 documented differences, 9 skipped). See docs/gnu-compat.md.
 
 ## 0.1.4 and earlier
 

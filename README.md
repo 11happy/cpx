@@ -251,7 +251,7 @@ cargo run -- -r test_data/ test_dest/
 
 ## Tests
 
-All 68 tests of the [GNU coreutils cp test suite](https://github.com/coreutils/coreutils/tree/master/tests/cp) are ported as independent reimplementations under [tests/gnu](tests/gnu) and run in CI: 48 pass, 11 are documented differences from GNU cp, 9 need root/SELinux or options cpx does not have. See [docs/gnu-compat.md](docs/gnu-compat.md).
+All 68 tests of the [GNU coreutils cp test suite](https://github.com/coreutils/coreutils/tree/master/tests/cp) are ported as independent reimplementations under [tests/gnu](tests/gnu) and run in CI: 49 pass, 10 are documented differences from GNU cp, 9 need root/SELinux or options cpx does not have. See [docs/gnu-compat.md](docs/gnu-compat.md).
 
 ```bash
 cargo build --release

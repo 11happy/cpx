@@ -1,7 +1,6 @@
 # GNU cp tests that cpx fails on purpose. One name per line; run.sh reports
 # these as XFAIL and only fails on unexpected results. See docs/gnu-compat.md.
 acl.sh
-cp-parents.sh
 cpx-i.sh
 existing-perm-dir.sh
 link-heap.sh

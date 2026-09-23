@@ -49,11 +49,11 @@ p=$(ls -ld g/sym | cut -b-10);     case $p in drwx-w--w-) ;; *) fail=1 ;; esac
 p=$(ls -ld e/d/a/b/c | cut -b-10); case $p in drwxr-xr-x) ;; *) fail=1 ;; esac
 p=$(ls -ld g/sym/b/c | cut -b-10); case $p in drwxr-xr-x) ;; *) fail=1 ;; esac
 
-# --parents with -t and an absolute source
-mkdir dest || exit 1
-if test -f /bin/ls; then
-  cpx -t dest --parents --preserve=mode,ownership,timestamps /bin/ls || fail=1
-  test -f dest/bin/ls || fail=1
-fi
+# --parents with -t and an absolute source (a regular file of our own; on
+# some distributions /bin/ls is itself a symlink, which cpx keeps as one)
+mkdir dest abs || exit 1
+echo data > abs/file || exit 1
+cpx -t dest --parents --preserve=mode,ownership,timestamps "$tmp/abs/file" || fail=1
+test -f "dest$tmp/abs/file" || fail=1
 
 exit $fail

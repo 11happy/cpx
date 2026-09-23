@@ -8,6 +8,15 @@ use std::process::Command;
 #[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 
+/// Where `cpx config init` writes under a given HOME (dirs::config_dir()).
+fn user_config_dir(home: &std::path::Path) -> std::path::PathBuf {
+    if cfg!(target_os = "macos") {
+        home.join("Library/Application Support/cpx")
+    } else {
+        home.join(".config/cpx")
+    }
+}
+
 /// Command for the cpx binary, isolated from the developer's own config files
 /// (a user config with `recursive = true` used to leak into these tests, #14).
 fn cpx() -> Command {
@@ -1116,7 +1125,7 @@ fn test_config_init() {
         .assert()
         .success();
 
-    let config_path = temp.path().join(".config/cpx/cpxconfig.toml");
+    let config_path = user_config_dir(temp.path()).join("cpxconfig.toml");
     assert!(config_path.exists());
 
     let contents = fs::read_to_string(&config_path).unwrap();
@@ -1128,7 +1137,7 @@ fn test_config_init() {
 #[test]
 fn test_config_init_force_overwrite() {
     let temp = assert_fs::TempDir::new().unwrap();
-    let config_dir = temp.path().join(".config/cpx");
+    let config_dir = user_config_dir(temp.path());
     fs::create_dir_all(&config_dir).unwrap();
 
     let config_path = config_dir.join("cpxconfig.toml");
@@ -1160,7 +1169,7 @@ fn test_config_path() {
 #[test]
 fn test_no_config_flag() {
     let temp = assert_fs::TempDir::new().unwrap();
-    let config_dir = temp.path().join(".config/cpx");
+    let config_dir = user_config_dir(temp.path());
     fs::create_dir_all(&config_dir).unwrap();
 
     let config_path = config_dir.join("cpxconfig.toml");
