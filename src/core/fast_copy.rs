@@ -133,8 +133,9 @@ fn rewind(mut src_file: std::fs::File, mut dest_file: std::fs::File) -> io::Resu
 
 fn lseek(file: &std::fs::File, offset: i64, whence: i32) -> Option<i64> {
     use std::os::fd::AsRawFd;
-    let r = unsafe { libc::lseek(file.as_raw_fd(), offset, whence) };
-    (r >= 0).then_some(r)
+    // lseek64: off_t is 32 bits on some 32-bit glibc targets (armv7).
+    let r = unsafe { libc::lseek64(file.as_raw_fd(), offset as libc::off64_t, whence) };
+    (r >= 0).then_some(r as i64)
 }
 
 /// A file is sparse when its first hole starts before its end. The probe

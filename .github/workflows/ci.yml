@@ -38,6 +38,13 @@ jobs:
       - name: Check formatting
         run: cargo fmt -- --check
 
+      # 32-bit glibc has a 32-bit off_t; catch type mismatches before release.
+      - name: Type-check the armv7 glibc target
+        if: runner.os == 'Linux'
+        run: |
+          rustup target add armv7-unknown-linux-gnueabihf
+          cargo check --target armv7-unknown-linux-gnueabihf
+
       - name: Build release binary for the GNU suite
         if: runner.os == 'Linux'
         run: cargo build --release

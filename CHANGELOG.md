@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.1 - 2026-09-23
+
+- Build fix for 32-bit glibc targets (armv7-unknown-linux-gnueabihf): the
+  sparse-file seek used `lseek` with a 64-bit offset where `off_t` is 32 bits.
+  CI now type-checks that target. No behaviour change on other platforms.
+
 ## 0.2.0 - 2026-09-23
 
 ### Performance
