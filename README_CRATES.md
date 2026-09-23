@@ -39,7 +39,7 @@ Copying 51% ██████████████████████�
 
 ### Prerequisites
 
-- **Linux** (kernel 4.5+ recommended for fast copy) or **macOS**
+- **Linux** (kernel 4.5+ recommended for fast copy); macOS builds are experimental
 - **Rust** 1.70 or later
 
 
@@ -221,11 +221,11 @@ mode = "auto"
 cache, 5 hyperfine runs; `cp` and `cpx -j4` are the defaults, `-j16` is what
 the [benchmarks](docs/benchmarks.md) use):
 
-| Tree | files | cp | cpx -j4 | cpx -j16 | xcp -w16 | cpz |
-|------|-------|----|---------|----------|----------|-----|
-| rust-lang/rust | 63k | 415 ms | 227 ms | **141 ms** | 193 ms | 61 ms |
-| torvalds/linux (2.1 GB) | 96k | 962 ms | 430 ms | **240 ms** | 348 ms | 180 ms |
-| 200k small files | 200k | 942 ms | 520 ms | **262 ms** | 380 ms | n/a |
+| Tree | files | cp | cpx -j4 | cpx -j16 | xcp -w16 |
+|------|-------|----|---------|----------|----------|
+| rust-lang/rust | 63k | 415 ms | 227 ms | **141 ms** | 193 ms |
+| torvalds/linux (2.1 GB) | 96k | 962 ms | 430 ms | **240 ms** | 348 ms |
+| 200k small files | 200k | 942 ms | 520 ms | **262 ms** | 380 ms |
 
 v0.1.4 had a quadratic planning step: the rust tree took **78 s**, the linux
 tree **154 s**, and the 200k-file tree did not finish in ten minutes. Upgrade
@@ -245,7 +245,7 @@ if you copy large trees.
 | Platform | Status | Notes |
 |----------|--------|-------|
 | **Linux** | ✅ Supported | copy_file_range fast path (kernel 4.5+), hole-preserving sparse copies |
-| **macOS** | ✅ Supported | built and tested in CI, binaries on the releases page |
+| macOS | 🧪 Experimental | compiles and passes the unit/integration tests in CI; not functionally tested on real hardware. Binaries are on the releases page, feedback welcome |
 | Windows | 🔄 Planned | To be released |
 
 ## Quick Start for Developers
