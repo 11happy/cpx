@@ -67,11 +67,13 @@ pub struct CLIArgs {
 #[derive(Args, Debug, Clone)]
 pub struct CopyArgs {
     // Input/Output Options
-    #[arg(help = "Source file(s) or directory(ies)", required = true)]
-    pub sources: Vec<PathBuf>,
-
-    #[arg(help = "Destination file or directory", required = true)]
-    pub destination: PathBuf,
+    /// SOURCE... DEST, or just SOURCE... when -t/--target-directory is given
+    #[arg(
+        value_name = "PATHS",
+        help = "Source file(s) or directory(ies) followed by the destination (or only sources with -t)",
+        required = true
+    )]
+    pub paths: Vec<PathBuf>,
 
     #[arg(
         short = 't',
@@ -361,12 +363,17 @@ impl CLIArgs {
             options.preserve = PreserveAttr::all();
         }
 
-        let (sources, destination) = if let Some(target) = copy_args.target_directory {
-            let mut sources = copy_args.sources;
-            sources.push(copy_args.destination);
-            (sources, target)
-        } else {
-            (copy_args.sources, copy_args.destination)
+        let mut sources = copy_args.paths;
+        let destination = match copy_args.target_directory {
+            Some(target) => target,
+            None => {
+                if sources.len() < 2 {
+                    return Err(CpxError::Validation(
+                        "missing destination operand (or use -t/--target-directory)".to_string(),
+                    ));
+                }
+                sources.pop().unwrap()
+            }
         };
 
         Ok((sources, destination, options))
@@ -520,8 +527,7 @@ mod tests {
     fn test_validate_symlink_and_hardlink_conflict() {
         let args = CLIArgs {
             command: Commands::Copy(CopyArgs {
-                sources: vec![PathBuf::from("source.txt")],
-                destination: PathBuf::from("dest.txt"),
+                paths: vec![PathBuf::from("source.txt"), PathBuf::from("dest.txt")],
                 target_directory: None,
                 recursive: false,
                 parallel: 4,
@@ -554,8 +560,7 @@ mod tests {
     fn test_validate_symlink_and_resume_conflict() {
         let args = CLIArgs {
             command: Commands::Copy(CopyArgs {
-                sources: vec![PathBuf::from("source.txt")],
-                destination: PathBuf::from("dest.txt"),
+                paths: vec![PathBuf::from("source.txt"), PathBuf::from("dest.txt")],
                 target_directory: None,
                 recursive: false,
                 parallel: 4,
@@ -588,8 +593,7 @@ mod tests {
     fn test_validate_hardlink_and_resume_conflict() {
         let args = CLIArgs {
             command: Commands::Copy(CopyArgs {
-                sources: vec![PathBuf::from("source.txt")],
-                destination: PathBuf::from("dest.txt"),
+                paths: vec![PathBuf::from("source.txt"), PathBuf::from("dest.txt")],
                 target_directory: None,
                 recursive: false,
                 parallel: 4,
@@ -622,8 +626,7 @@ mod tests {
     fn test_validate_success() {
         let args = CLIArgs {
             command: Commands::Copy(CopyArgs {
-                sources: vec![PathBuf::from("source.txt")],
-                destination: PathBuf::from("dest.txt"),
+                paths: vec![PathBuf::from("source.txt"), PathBuf::from("dest.txt")],
                 target_directory: None,
                 recursive: false,
                 parallel: 4,
