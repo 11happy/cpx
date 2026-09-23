@@ -49,6 +49,7 @@ pub fn fast_copy(
     const TARGET_UPDATES: u64 = 128;
     const MIN_CHUNK: usize = 4 * 1024 * 1024;
     let chunk_size = std::cmp::max(MIN_CHUNK, (file_size / TARGET_UPDATES) as usize);
+    let mut total_copied = 0u64;
     loop {
         if options.abort.load(Ordering::Relaxed) {
             drop(dest_file); // Close file
@@ -67,16 +68,21 @@ pub fn fast_copy(
             )));
         }
 
-        // Don't bound by file_size: procfs/sysfs files report st_size 0 but
-        // still have content, and copy_file_range returns 0 at real EOF.
+        // Don't bound the request by file_size: procfs/sysfs files report
+        // st_size 0 but still have content. Stop once the known size has been
+        // copied so a regular file costs one syscall, not one plus an EOF probe.
         match copy_file_range(&src_file, None, &dest_file, None, chunk_size) {
             Ok(0) => break,
             Ok(copied) => {
+                total_copied += copied as u64;
                 if let Some(pb) = overall_pb {
                     pb.inc(copied as u64);
                 }
                 if let Some(pb) = file_pb {
                     pb.inc(copied as u64);
+                }
+                if file_size > 0 && total_copied >= file_size {
+                    break;
                 }
             }
             Err(_) => {

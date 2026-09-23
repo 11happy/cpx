@@ -12,7 +12,6 @@ use crate::utility::preprocess::{
 use crate::utility::preserve::{self, HardLinkTracker, PreserveAttr};
 use crate::utility::progress_bar::ProgressBarStyle;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
-use rayon::prelude::*;
 use std::io::{self, Read, Write};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -206,42 +205,45 @@ fn execute_copy(plan: CopyPlan, options: &CopyOptions) -> CopyResult<()> {
                 reason: format!("Failed to create thread pool: {}", e),
             })?;
 
-        let results: Vec<_> = pool.install(|| {
-            plan.files
-                .par_iter()
-                .map(|file_task| {
-                    let result = copy_core(
-                        &file_task.source,
-                        &file_task.destination,
-                        file_task.size,
-                        multi.as_ref(),
-                        overall_pb.as_deref(),
-                        &completed_files,
-                        plan.total_files,
-                        options,
-                        hardlink_tracker.as_ref(),
-                    );
-
-                    match result {
-                        Ok(()) => Ok(()),
-                        Err(e) => Err((file_task.source.clone(), file_task.destination.clone(), e)),
-                    }
-                })
-                .collect()
+        // Files are sorted largest-first; every worker pulls the next one from a
+        // shared counter (longest-processing-time-first scheduling). A plain
+        // par_iter would hand one worker a contiguous chunk of the largest files
+        // to copy sequentially while the others sit idle on the tail of small ones.
+        let next = AtomicUsize::new(0);
+        let per_thread_errors: Vec<Vec<(PathBuf, PathBuf, CopyError)>> = pool.broadcast(|_| {
+            let mut errors = Vec::new();
+            loop {
+                let i = next.fetch_add(1, Ordering::Relaxed);
+                let Some(file_task) = plan.files.get(i) else {
+                    break;
+                };
+                if let Err(e) = copy_core(
+                    &file_task.source,
+                    &file_task.destination,
+                    file_task.size,
+                    multi.as_ref(),
+                    overall_pb.as_deref(),
+                    &completed_files,
+                    plan.total_files,
+                    options,
+                    hardlink_tracker.as_ref(),
+                ) {
+                    errors.push((file_task.source.clone(), file_task.destination.clone(), e));
+                }
+            }
+            errors
         });
 
         let mut interrupted = false;
         let mut errors: Vec<(PathBuf, PathBuf, CopyError)> = Vec::new();
 
-        for result in results.into_iter() {
-            if let Err((source, dest, e)) = result {
-                match e {
-                    CopyError::Io(ref io_err) if io_err.kind() == io::ErrorKind::Interrupted => {
-                        interrupted = true;
-                    }
-                    _ => {
-                        errors.push((source, dest, e));
-                    }
+        for (source, dest, e) in per_thread_errors.into_iter().flatten() {
+            match e {
+                CopyError::Io(ref io_err) if io_err.kind() == io::ErrorKind::Interrupted => {
+                    interrupted = true;
+                }
+                _ => {
+                    errors.push((source, dest, e));
                 }
             }
         }

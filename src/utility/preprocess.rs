@@ -2,7 +2,7 @@ use super::exclude::should_exclude;
 use super::helper::with_parents;
 use crate::cli::args::{CopyOptions, FollowSymlink, SymlinkMode};
 use crate::error::{CopyError, CopyResult};
-use jwalk::WalkDir;
+use jwalk::WalkDirGeneric;
 use std::collections::HashMap;
 use std::fs::Metadata;
 use std::io;
@@ -83,17 +83,42 @@ impl CopyPlan {
         self.add_file_with_inode(source, destination, size, None);
     }
 
-    // last source wins, if multiple sources collide prevents symlink write-through
-    fn remove_existing_task(&mut self, dest: &Path) {
-        self.symlinks.retain(|t| t.destination != dest);
-        self.hardlinks.retain(|t| t.destination != dest);
-
-        if let Some(pos) = self.files.iter().position(|t| t.destination == dest) {
-            let removed = self.files.remove(pos);
-            self.total_size -= removed.size;
-            self.total_files -= 1;
+    /// Refuse plans where two sources map to the same destination, like GNU
+    /// cp's "will not overwrite just-created ... with ...". Sorting once is
+    /// O(n log n); the previous per-task linear scan made planning O(n²).
+    pub fn check_collisions(&self) -> CopyResult<()> {
+        let mut dests: Vec<(&Path, &Path)> = self
+            .files
+            .iter()
+            .map(|t| (t.destination.as_path(), t.source.as_path()))
+            .chain(
+                self.symlinks
+                    .iter()
+                    .map(|t| (t.destination.as_path(), t.source.as_path())),
+            )
+            .chain(
+                self.hardlinks
+                    .iter()
+                    .map(|t| (t.destination.as_path(), t.source.as_path())),
+            )
+            .collect();
+        dests.sort_unstable();
+        for pair in dests.windows(2) {
+            if pair[0].0 == pair[1].0 {
+                return Err(CopyError::CopyFailed {
+                    source: pair[1].1.to_path_buf(),
+                    destination: pair[1].0.to_path_buf(),
+                    reason: format!(
+                        "will not overwrite just-created '{}' with '{}'",
+                        pair[1].0.display(),
+                        pair[1].1.display()
+                    ),
+                });
+            }
         }
+        Ok(())
     }
+
     pub fn add_file_with_inode(
         &mut self,
         source: PathBuf,
@@ -101,7 +126,6 @@ impl CopyPlan {
         size: u64,
         inode_group: Option<u64>,
     ) {
-        self.remove_existing_task(&destination);
         self.files.push(FileTask {
             source,
             destination,
@@ -120,7 +144,6 @@ impl CopyPlan {
     }
 
     pub fn add_symlink(&mut self, source: PathBuf, destination: PathBuf, kind: SymlinkKind) {
-        self.remove_existing_task(&destination);
         self.symlinks.push(SymlinkTask {
             source,
             destination,
@@ -130,7 +153,6 @@ impl CopyPlan {
     }
 
     pub fn add_hardlink(&mut self, source: PathBuf, destination: PathBuf) {
-        self.remove_existing_task(&destination);
         self.hardlinks.push(HardlinkTask {
             source,
             destination,
@@ -433,11 +455,38 @@ pub fn preprocess_directory(
 
     let mut inode_groups = None;
 
-    for entry in WalkDir::new(&walk_root)
+    // Stat entries and apply exclude rules inside the walker's per-directory
+    // callback: it runs on the walker's thread pool, and excluded directories
+    // are pruned before they are descended into.
+    let exclude_rules = options.exclude_rules.clone();
+    let exclude_source = source.to_path_buf();
+    let exclude_walk_root = walk_root.clone();
+    let walker = WalkDirGeneric::<((), Option<Metadata>)>::new(&walk_root)
         .skip_hidden(false)
         .parallelism(jwalk::Parallelism::RayonNewPool(num_threads))
         .follow_links(follow_symlink)
-    {
+        .process_read_dir(move |_depth, _path, _state, children| {
+            if let Some(rules) = &exclude_rules {
+                children.retain(|child| match child {
+                    Ok(child) => {
+                        let path = child.path();
+                        let full_source_path = match path.strip_prefix(&exclude_walk_root) {
+                            Ok(relative) if exclude_walk_root != exclude_source => {
+                                exclude_source.join(relative)
+                            }
+                            _ => path,
+                        };
+                        !should_exclude(&full_source_path, &exclude_source, rules)
+                    }
+                    Err(_) => true,
+                });
+            }
+            for child in children.iter_mut().flatten() {
+                child.client_state = child.metadata().ok();
+            }
+        });
+
+    for entry in walker {
         let entry = entry.map_err(|e| CopyError::CopyFailed {
             source: source.to_path_buf(),
             destination: destination.to_path_buf(),
@@ -456,24 +505,15 @@ pub fn preprocess_directory(
                 reason: "Failed to calculate relative path".to_string(),
             })?;
 
-        let full_source_path = if walk_root != source {
-            source.join(relative)
-        } else {
-            src_path.to_path_buf()
-        };
-
-        if let Some(exclude_rules) = &options.exclude_rules
-            && should_exclude(&full_source_path, source, exclude_rules)
-        {
-            continue;
-        }
-
         let dest_path = root_destination.join(relative);
-        let metadata = entry.metadata().map_err(|e| CopyError::CopyFailed {
-            source: src_path.to_path_buf(),
-            destination: destination.to_path_buf(),
-            reason: format!("Failed to get metadata: {}", e),
-        })?;
+        let metadata = match entry.client_state {
+            Some(ref metadata) => metadata.clone(),
+            None => entry.metadata().map_err(|e| CopyError::CopyFailed {
+                source: src_path.to_path_buf(),
+                destination: destination.to_path_buf(),
+                reason: format!("Failed to get metadata: {}", e),
+            })?,
+        };
 
         if metadata.is_dir() {
             plan.add_directory(Some(src_path.to_path_buf()), dest_path);
@@ -569,6 +609,7 @@ pub fn preprocess_multiple(
     }
 
     plan.sort_files_descending();
+    plan.check_collisions()?;
     Ok(plan)
 }
 

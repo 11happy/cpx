@@ -388,10 +388,10 @@ fn test_symlink_mode_auto_relative() {
     source.write_str("content").unwrap();
     dest_dir.create_dir_all().unwrap();
 
-    let original_dir = std::env::current_dir().unwrap();
-    std::env::set_current_dir(temp.path()).unwrap();
-
+    // Use the command's cwd rather than set_current_dir, which races with
+    // the other tests running in parallel threads.
     cpx()
+        .current_dir(temp.path())
         .arg("-s")
         .arg("auto")
         .arg("source.txt")
@@ -404,8 +404,6 @@ fn test_symlink_mode_auto_relative() {
 
     let target = fs::read_link(symlink_path.path()).unwrap();
     assert!(!target.is_absolute());
-
-    std::env::set_current_dir(original_dir).unwrap();
 }
 
 #[test]
@@ -837,10 +835,8 @@ fn test_parents_flag() {
     source_file.write_str("content").unwrap();
     dest_dir.create_dir_all().unwrap();
 
-    let original_dir = std::env::current_dir().unwrap();
-    std::env::set_current_dir(temp.path()).unwrap();
-
     cpx()
+        .current_dir(temp.path())
         .arg("--parents")
         .arg("a/b/c/file.txt")
         .arg("dest")
@@ -848,8 +844,6 @@ fn test_parents_flag() {
         .success();
 
     temp.child("dest/a/b/c/file.txt").assert("content");
-
-    std::env::set_current_dir(original_dir).unwrap();
 }
 
 #[test]

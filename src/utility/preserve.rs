@@ -53,8 +53,14 @@ impl PreserveAttr {
     }
 
     pub fn from_string(s: &str) -> PreserveResult<Self> {
-        if s.is_empty() {
+        // "default" and "none" are the documented config values; they used to
+        // fall through to "Unknown attribute" and silently become the default.
+        if s.is_empty() || s == "default" {
             return Ok(Self::default());
+        }
+
+        if s == "none" {
+            return Ok(Self::none());
         }
 
         if s == "all" {
